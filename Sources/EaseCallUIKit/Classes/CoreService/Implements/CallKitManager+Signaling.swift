@@ -8,7 +8,230 @@
 import Foundation
 import AgoraRtcKit
 
-extension CallKitManager: ChatEventsListener {
+extension CallKitManager: CallSignalingManagerDelegate {
+
+    private var signalingManager: CallSignalingManager? {
+        ChatClient.shared().callSignalingManager
+    }
+
+    private func signalingJSON(_ value: [String: Any]?) -> String? {
+        guard let value, JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value),
+              let string = String(data: data, encoding: .utf8) else { return nil }
+        return string
+    }
+
+    private func signalingDictionary(_ value: String?) -> [String: Any]? {
+        guard let value, !value.isEmpty, let data = value.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data),
+              let dictionary = json as? [String: Any] else { return nil }
+        return dictionary
+    }
+
+    private func signalingCallType(kind: CallSignalingKind, mediaType: CallSignalingMediaType) -> CallType {
+        if kind == .conference { return .groupCall }
+        return mediaType == .video ? .singleVideo : .singleAudio
+    }
+
+    private func signalingCallKind(_ type: CallType) -> CallSignalingKind {
+        type == .groupCall ? .conference : .single
+    }
+
+    private func signalingMediaType(_ type: CallType) -> CallSignalingMediaType {
+        type == .singleVideo ? .video : .voice
+    }
+
+    private func signalingEndReason(_ reason: CallSignalingEndReason, local: Bool) -> CallEndReason {
+        switch reason {
+        case .canceled: return local ? .cancel : .remoteCancel
+        case .rejected: return local ? .refuse : .remoteRefuse
+        case .timeout: return local ? .noResponse : .remoteNoResponse
+        case .busy: return .busy
+        case .hangup, .lastLeft: return local ? .hangup : .remoteCancel
+        default: return .abnormalEnd
+        }
+    }
+
+    private func callInfoForInvitation(callId: String, inviterId: String, kind: CallSignalingKind,
+                                       mediaType: CallSignalingMediaType, conversationId: String?, ext: String?) -> CallInfo {
+        let type = signalingCallType(kind: kind, mediaType: mediaType)
+        let info = CallInfo(callId: callId, callerId: inviterId, callerDeviceId: "",
+                            channelName: "channel-\(callId)", type: type,
+                            extensionInfo: signalingDictionary(ext))
+        if type == .groupCall { info.groupId = conversationId }
+        info.calleeId = ChatClient.shared().currentUsername ?? ""
+        info.calleeDeviceId = ChatClient.shared().getDeviceConfig(nil)?.deviceUUID ?? ""
+        info.state = .ringing
+        return info
+    }
+
+    private func notifySignalingError(_ error: ChatError?) {
+        guard let error else { return }
+        notifyCallError(CallError(CallError.IM(error: error), module: .im))
+    }
+
+    private func cleanupFailedSignaling(callId: String) {
+        let cleanup = { [weak self] in
+            guard let self else { return }
+            self.callStartTimerStop(callId: callId)
+            self.stopInvitationSignalTimer(callId: callId)
+            self.stopConfirmBuildConnectionTimer(callId: callId)
+            self.stopRingTimer(callId: callId)
+            self.quitCall()
+            if let currentVC = UIViewController.currentController,
+               currentVC is Call1v1AudioViewController || currentVC is Call1v1VideoViewController || currentVC is CallMultiViewController {
+                currentVC.dismiss(animated: false)
+            }
+            self.popup?.dismiss()
+        }
+        if Thread.isMainThread {
+            cleanup()
+        } else {
+            DispatchQueue.main.async(execute: cleanup)
+        }
+    }
+
+    public func callInvitationDidReceive(_ callId: String, inviterId: String, kind: CallSignalingKind,
+                                  mediaType: CallSignalingMediaType, conversationId: String?, ext: String?) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            guard self.callInfo == nil || self.callInfo?.state == .idle else {
+                self.signalingManager?.rejectCall(callId, reason: .busy, completion: nil)
+                return
+            }
+            let info = self.callInfoForInvitation(callId: callId, inviterId: inviterId, kind: kind,
+                                                  mediaType: mediaType, conversationId: conversationId, ext: ext)
+            self.receivedCalls[callId] = info
+            self.callInfo = info
+            for listener in self.listeners.allObjects {
+                listener.onReceivedCall?(callType: info.type, userId: inviterId, extensionInfo: info.extensionInfo ?? [:])
+            }
+            self.showReceivedCallAlert(call: info)
+        }
+    }
+
+    public func callParticipantsDidInvite(_ callId: String, revision: UInt64, invitedUserIds: [String],
+                                   inviterId: String, ext: String?) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.callInfo?.callId == callId else { return }
+            if let call = self.callInfo {
+                call.inviteUsers.append(contentsOf: invitedUserIds.filter { !call.inviteUsers.contains($0) })
+            }
+            self.callInfo?.extensionInfo = self.signalingDictionary(ext) ?? self.callInfo?.extensionInfo
+        }
+    }
+
+    public func callParticipantsDidChange(_ callId: String, revision: UInt64, participants: [CallSignalingParticipant]) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let call = self.callInfo, call.callId == callId else { return }
+            let currentUserId = ChatClient.shared().currentUsername ?? ""
+            let participantByUserId = Dictionary(participants.map { ($0.userId, $0) }, uniquingKeysWith: { _, latest in latest })
+            let remoteParticipants = participants.filter { $0.userId != currentUserId }
+            let remoteAccepted = remoteParticipants.contains { $0.state == .accepted }
+            let localAccepted = participantByUserId[currentUserId]?.state == .accepted
+
+            // The signaling snapshot is the source of truth for the call phase. A
+            // participant callback may arrive before the legacy answer/end callback,
+            // so update CallInfo here as well as the participant UI.
+            if call.type == .groupCall {
+                if remoteAccepted || (localAccepted && call.callerId != currentUserId) {
+                    self.updateCallStateFromParticipants(call: call, state: .answering)
+                } else if call.callerId == currentUserId {
+                    self.updateCallStateFromParticipants(call: call, state: .dialing)
+                } else {
+                    self.updateCallStateFromParticipants(call: call, state: .ringing)
+                }
+            } else if remoteAccepted || (localAccepted && call.callerId != currentUserId) {
+                self.updateCallStateFromParticipants(call: call, state: .answering)
+            } else if let remote = remoteParticipants.first {
+                switch remote.state {
+                case .pending, .ringing:
+                    self.updateCallStateFromParticipants(call: call, state: call.callerId == currentUserId ? .dialing : .ringing)
+                case .rejected, .busy, .timeout, .canceled, .left, .hanguped:
+                    self.updateCallEndReason(self.endReasonForParticipant(remote.state.rawValue, local: false))
+                    return
+                default:
+                    break
+                }
+            }
+
+            call.inviteUsers = participants
+                .filter { $0.state != .left && $0.state != .rejected && $0.state != .canceled && $0.state != .timeout && $0.state != .hanguped }
+                .map(\.userId)
+            for participant in participants where participant.state == .accepted {
+                if self.itemsCache[participant.userId] == nil {
+                    let item = CallStreamItem(userId: participant.userId, index: self.itemsCache.count + 1, isExpanded: false)
+                    item.waiting = false
+                    self.itemsCache[participant.userId] = item
+                } else {
+                    self.itemsCache[participant.userId]?.waiting = false
+                }
+            }
+            (UIViewController.currentController as? CallMultiViewController)?.callView.updateWithItems()
+            let activeUsers = Set(participants.filter {
+                $0.state != .left && $0.state != .rejected && $0.state != .canceled &&
+                $0.state != .timeout && $0.state != .hanguped
+            }.map(\.userId))
+            let removedUsers = self.itemsCache.keys.filter { $0 != ChatClient.shared().currentUsername && !activeUsers.contains($0) }
+            for userId in removedUsers {
+                for listener in self.listeners.allObjects {
+                    listener.remoteUserDidLeft?(userId: userId, channelName: call.channelName, type: call.type)
+                }
+                self.itemsCache.removeValue(forKey: userId)
+                self.canvasCache[userId]?.removeFromSuperview()
+                self.canvasCache.removeValue(forKey: userId)
+            }
+            (UIViewController.currentController as? CallMultiViewController)?.callView.updateWithItems(removedUsers)
+        }
+    }
+
+    private func updateCallStateFromParticipants(call: CallInfo, state: CallState) {
+        guard call.state != state else { return }
+        if state == .answering {
+            self.stopInvitationSignalTimer(callId: call.callId)
+            self.stopConfirmBuildConnectionTimer(callId: call.callId)
+            self.callStartTimerStop(callId: call.callId)
+            if call.state != .answering {
+                (self.callVC as? Call1v1AudioViewController)?.addCallTimer()
+                (self.callVC as? Call1v1VideoViewController)?.addCallTimer()
+            }
+        }
+        call.state = state
+    }
+
+    private func endReasonForParticipant(_ state: Int, local: Bool) -> CallEndReason {
+        switch state {
+        case 5: return local ? .refuse : .remoteRefuse
+        case 6: return .busy
+        case 7: return local ? .noResponse : .remoteNoResponse
+        case 4, 8, 9: return local ? .hangup : .remoteCancel
+        default: return .abnormalEnd
+        }
+    }
+
+    public func callDidHandle(onOtherDevice callId: String, type: CallSignalingOtherDeviceHandleType) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.callInfo?.callId == callId else { return }
+            self.receivedCalls.removeValue(forKey: callId)
+            self.updateCallEndReason(.handleOnOtherDevice)
+        }
+    }
+
+    public func callDidEnd(_ callId: String, reason: CallSignalingEndReason) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let isLocal = self.callInfo?.callerId == ChatClient.shared().currentUsername
+            let mapped = self.signalingEndReason(reason, local: isLocal)
+            if self.callInfo?.callId == callId {
+                self.stopInvitationSignalTimer(callId: callId)
+                self.stopConfirmBuildConnectionTimer(callId: callId)
+                self.stopRingTimer(callId: callId)
+                self.updateCallEndReason(mapped)
+            } else {
+                self.receivedCalls.removeValue(forKey: callId)
+            }
+        }
+    }
     
     private struct CallEndReasonSnapshot: Sendable {
         let info: CallInfo
@@ -92,6 +315,8 @@ extension CallKitManager: ChatEventsListener {
     }
     
     public func messagesDidReceive(_ aMessages: [ChatMessage]) {
+        return
+        /*
         for message in aMessages {
             if message.chatType == .chat || message.chatType == .groupChat {
                 if let ext = message.ext as? [String: Any],!ext.isEmpty {
@@ -99,9 +324,12 @@ extension CallKitManager: ChatEventsListener {
                 }
             }
         }
+        */
     }
     
     public func cmdMessagesDidReceive(_ aCmdMessages: [ChatMessage]) {
+        return
+        /*
         for message in aCmdMessages {
             if message.chatType == .chat || message.chatType == .groupChat {
                 if let ext = message.ext as? [String: Any],!ext.isEmpty {
@@ -109,9 +337,12 @@ extension CallKitManager: ChatEventsListener {
                 }
             }
         }
+        */
     }
     
     private func parseCallInfo(from message: ChatMessage) {
+        return
+        /*
         
         if let ext = message.ext as? [String: Any] {
             guard let msgType = ext[kMsgType] as? String,
@@ -449,6 +680,7 @@ extension CallKitManager: ChatEventsListener {
             }
 
         }
+        */
     }
     
     private func dismissCurrentCallPage() {
@@ -481,27 +713,8 @@ extension CallKitManager: ChatEventsListener {
             }
         }
         
-        if let message = ChatClient.shared().chatManager?.getMessageWithMessageId(snapshot.inviteMessageId) {
-            let ext = message.ext ?? [:]
-            var newExt = ext
-            newExt[kCallEndReason] = reason.rawValue
-            if snapshot.duration > 0 {
-                let duration = snapshot.duration
-                newExt[kCallDuration] = duration
-            }
-            message.ext = newExt
-            Task {
-                let result = await ChatClient.shared().chatManager?.update(message)
-                if let error = result?.1 {
-                    consoleLogInfo("Failed to update call reason:\(reason.rawValue): \(String(describing: error.errorDescription))", type: .error)
-                } else {
-                    if immediateCallback {
-                        self.notifyCallEndReason(reason, info: snapshot.info)
-                    }
-                }
-            }
-        } else {
-            consoleLogInfo("Failed to find invite message for callId:\(snapshot.info.callId) messageId:\(snapshot.inviteMessageId)", type: .error)
+        if immediateCallback {
+            self.notifyCallEndReason(reason, info: snapshot.info)
         }
     }
     private func showReceivedCallAlert(call: CallInfo) {
@@ -831,63 +1044,32 @@ extension CallKitManager: CallMessageService {
 
     // New helper method to send signaling
     private func sendCallSignaling(userId: String, type: CallType, callId: String, channelName: String, extensionInfo: [String: Any]?) {
-        var ext: [String: Any] = [
-            kMsgType: kMsgTypeValue,
-            kAction: CALL_INVITE,
-            kCallId: callId,
-            kCallType: type.rawValue,
-            kCallerDevId: ChatClient.shared().getDeviceConfig(nil)?.deviceUUID ?? "",
-            kChannelName: channelName,
-            kTs: Int(Date().timeIntervalSince1970 * 1000),
-            kCallDuration: 0,
-            kCallEndReason: CallEndReason.remoteNoResponse.rawValue,
-            "callerNickname": self.currentUserInfo?.nickname ?? ""
-        ]
-        
-        if extensionInfo != nil {
-            ext[kExt] = extensionInfo
+        guard let manager = signalingManager else {
+            handleBusinessError(CallError.CallBusiness(error: .signaling, message: "Call signaling manager is unavailable"))
+            cleanupFailedSignaling(callId: callId)
+            return
         }
-        
-        let json = CallKitManager.shared.currentUserInfo?.toJsonObject() ?? [:]
-        if !json.isEmpty,self.compatibilityModeForUserInfo {
-            ext.merge(json) { _, new in new }
-        }
-        
-        if self.config.enableVOIP {
-            ext[kPush_payload] = ["type":"call","custom":ext]
-            ext[kPush_iOS_payload_apns] = ["em_push_type":"voip"]
-        }
-        
-        let message = ChatMessage(
-            conversationID: userId,
-            body: ChatTextMessageBody(text: (type == .singleAudio ? "invite_info_audio":"invite_info_video").call.localize),
-            ext: ext
-        )
-        
-        Task {
-            let result = await ChatClient.shared().chatManager?.send(message, progress: nil)
-            if let error = result?.1 {
-                self.handleError(error)
-                consoleLogInfo("Failed to send call message: \(String(describing: error.errorDescription))", type: .error)
-                self.callStartTimerStop(callId: callId)
+        let request = CallCreateRequest(kind: signalingCallKind(type), mediaType: signalingMediaType(type), targetUserIds: [userId])
+        request.timeoutSeconds = 10
+        request.conversationId = nil
+        request.pushTitle = extensionInfo?["pushTitle"] as? String
+        request.pushContent = extensionInfo?["pushContent"] as? String
+        request.ext = signalingJSON(extensionInfo)
+        manager.createCall(request) { [weak self] result, error in
+            guard let self else { return }
+            if let error {
+                self.notifySignalingError(error);
+                self.cleanupFailedSignaling(callId: callId)
                 return
             }
-            
-            // Update call info with message details
-            self.callInfo?.inviteMessageId = result?.0?.messageId ?? ""
-            self.callInfo?.extensionInfo = message.ext as? [String : Any]
-            
-            // Start call timer
-            self.callStartTimerStart(callId: callId)
-            
-            // Join channel after successful signaling
-            self.joinChannel(channelName: channelName) { [weak self] success in
-                guard let `self` = self else { return }
-                if !success {
-                    // Handle join channel failure
-                    self.callStartTimerStop(callId: callId)
-                    self.hangup()
-                }
+            let actualCallId = result?.snapshot?.callId ?? callId
+            self.callInfo?.callId = actualCallId
+            self.callInfo?.channelName = "channel-\(actualCallId)"
+            self.callInfo?.extensionInfo = extensionInfo
+            self.callStartTimerStart(callId: actualCallId)
+            self.joinChannel(channelName: self.callInfo?.channelName ?? channelName) { [weak self] success in
+                guard let self else { return }
+                if !success { self.callStartTimerStop(callId: actualCallId); self.hangup() }
             }
         }
     }
@@ -1091,6 +1273,50 @@ extension CallKitManager: CallMessageService {
         extensionInfo: [String: Any]?,
         isAlreadyInCall: Bool
     ) {
+        guard let manager = signalingManager else {
+            handleBusinessError(CallError.CallBusiness(error: .signaling, message: "Call signaling manager is unavailable"))
+            cleanupFailedSignaling(callId: callId)
+            return
+        }
+        let targets = ids.filter { $0 != ChatClient.shared().currentUsername }
+        let completion: CallCompletion = { [weak self] result, error in
+            guard let self else { return }
+            if let error {
+                self.notifySignalingError(error)
+                self.cleanupFailedSignaling(callId: callId)
+                return
+            }
+            if let actualCallId = result?.snapshot?.callId, actualCallId != callId {
+                self.callInfo?.callId = actualCallId
+                self.callInfo?.channelName = "channel-\(actualCallId)"
+            }
+            self.callInfo?.inviteUsers = targets
+            self.callInfo?.extensionInfo = extensionInfo
+            let timerCallId = self.callInfo?.callId ?? callId
+            let timerKey = timerCallId + " users:" + ids.joined(separator: ",")
+            self.callStartTimerStart(callId: timerKey)
+            if !isAlreadyInCall {
+                self.joinChannel(channelName: self.callInfo?.channelName ?? channelName) { [weak self] success in
+                    guard let self else { return }
+                    if !success { self.callStartTimerStop(callId: timerKey); self.hangup() }
+                }
+            }
+        }
+        if isAlreadyInCall {
+            manager.inviteParticipants(callId, userIds: targets, timeoutSeconds: 60,
+                                       ext: signalingJSON(extensionInfo), pushTitile: nil, pushContent: nil,
+                                       completion: completion)
+        } else {
+            let request = CallCreateRequest(kind: .conference, mediaType: .video, targetUserIds: targets)
+            request.timeoutSeconds = 60
+            request.conversationId = groupId
+            request.pushTitle = extensionInfo?["pushTitle"] as? String
+            request.pushContent = extensionInfo?["pushContent"] as? String
+            request.ext = signalingJSON(extensionInfo)
+            manager.createCall(request, completion: completion)
+        }
+        return
+        /*
         var ext: [String: Any] = [
             kMsgType: kMsgTypeValue,
             kAction: CALL_INVITE,
@@ -1161,6 +1387,7 @@ extension CallKitManager: CallMessageService {
                 }
             }
         }
+        */
     }
 
     private func sendGroupCallSignaling(
@@ -1172,6 +1399,38 @@ extension CallKitManager: CallMessageService {
         groupAvatar: String,
         extensionInfo: [String: Any]?
     ) {
+        guard let manager = signalingManager else {
+            handleBusinessError(CallError.CallBusiness(error: .signaling, message: "Call signaling manager is unavailable"))
+            cleanupFailedSignaling(callId: callId)
+            return
+        }
+        let targets = ids.filter { $0 != ChatClient.shared().currentUsername }
+        let request = CallCreateRequest(kind: .conference, mediaType: .video, targetUserIds: targets)
+        request.timeoutSeconds = 60
+        request.conversationId = groupId
+        request.pushTitle = extensionInfo?["pushTitle"] as? String
+        request.pushContent = extensionInfo?["pushContent"] as? String
+        request.ext = signalingJSON(extensionInfo)
+        manager.createCall(request) { [weak self] result, error in
+            guard let self else { return }
+            if let error {
+                self.notifySignalingError(error)
+                self.cleanupFailedSignaling(callId: callId)
+                return
+            }
+            let actualCallId = result?.snapshot?.callId ?? callId
+            self.callInfo?.callId = actualCallId
+            self.callInfo?.channelName = "channel-\(actualCallId)"
+            self.callInfo?.inviteUsers = targets
+            self.callInfo?.extensionInfo = extensionInfo
+            self.callStartTimerStart(callId: actualCallId + " users:" + ids.joined(separator: ","))
+            self.joinChannel(channelName: self.callInfo?.channelName ?? channelName) { [weak self] success in
+                guard let self else { return }
+                if !success { self.hangup() }
+            }
+        }
+        return
+        /*
         var ext: [String: Any] = [
             kMsgType: kMsgTypeValue,
             kAction: CALL_INVITE,
@@ -1226,6 +1485,7 @@ extension CallKitManager: CallMessageService {
             let timerKey = callId + " users:" + ids.joined(separator: ",")
             self.callStartTimerStart(callId: timerKey)
         }
+        */
     }
     
     /// Caller answers the call from the callee.
@@ -1234,6 +1494,9 @@ extension CallKitManager: CallMessageService {
     ///   - callerId: The ID of the caller.
     ///   - callerDeviceId: The device ID of the caller.
     public func calleeAnswerCaller(callId: String, callerId: String, callerDeviceId: String) {
+        // Legacy confirmation is represented by EMCallSignalingManager participant events.
+        return
+        /*
         if callId.isEmpty || callerId.isEmpty || callerDeviceId.isEmpty {
             consoleLogInfo("Invalid parameters for calleeAnswerCaller: callId: \(callId), callerId: \(callerId), callerDeviceId: \(callerDeviceId)", type: .error)
             self.handleBusinessError(CallError.CallBusiness(error: .signaling, message: "Invalid parameters for call"))
@@ -1262,6 +1525,7 @@ extension CallKitManager: CallMessageService {
                 consoleLogInfo("Failed to send calleeAnswerCaller message: \(String(describing: error.errorDescription))", type: .error)
             }
         }
+        */
     }
     
     /// Cancel an ongoing call from caller.
@@ -1278,6 +1542,18 @@ extension CallKitManager: CallMessageService {
     }
     
     public func sendCancelSignal(callId: String, calleeId: String) {
+        guard let manager = signalingManager else {
+            handleBusinessError(CallError.CallBusiness(error: .signaling, message: "Call signaling manager is unavailable"))
+            return
+        }
+        manager.cancelCall(callId) { [weak self] _, error in
+            if let error { self?.notifySignalingError(error) }
+        }
+        if let call = callInfo, call.callId == callId, call.callerId == ChatClient.shared().currentUsername {
+            updateCallEndReason(.cancel)
+        }
+        return
+        /*
         let json = CallKitManager.shared.currentUserInfo?.toJsonObject() ?? [:]
         var ext: [String: Any] = [
             kMsgType: kMsgTypeValue,
@@ -1319,6 +1595,7 @@ extension CallKitManager: CallMessageService {
                 self.updateCallEndReason(.cancel)
             }
         }
+        */
     }
     
     public func terminateCall() {
@@ -1342,13 +1619,33 @@ extension CallKitManager: CallMessageService {
                 } else {
                     to = ids.joined(separator: ",")
                 }
-                self.sendTerminateSignal(callId: call.callId, to: to)
+                self.sendLeaveSignal(callId: call.callId, to: to)
             }
             
         }
     }
     
+    func sendLeaveSignal(callId: String, to: String) {
+        guard let manager = signalingManager else {
+            handleBusinessError(CallError.CallBusiness(error: .signaling, message: "Call signaling manager is unavailable"))
+            return
+        }
+        manager.leaveCall(callId) { [weak self] _, error in
+            if let error { self?.notifySignalingError(error) }
+        }
+        return
+    }
+    
     func sendTerminateSignal(callId: String, to: String) {
+        guard let manager = signalingManager else {
+            handleBusinessError(CallError.CallBusiness(error: .signaling, message: "Call signaling manager is unavailable"))
+            return
+        }
+        manager.terminateCall(callId) { [weak self] _, error in
+            if let error { self?.notifySignalingError(error) }
+        }
+        return
+        /*
         Task {
             var conversationId = to
             if let call = self.callInfo {
@@ -1379,6 +1676,7 @@ extension CallKitManager: CallMessageService {
                 consoleLogInfo("Failed to send terminate call message: \(String(describing: error.errorDescription))", type: .error)
             }
         }
+        */
     }
     
     /// Confirm the ring for a call from the caller.
@@ -1388,6 +1686,8 @@ extension CallKitManager: CallMessageService {
     ///   - calleeDeviceId: The device ID of the callee.
     ///   - is_valid: A boolean indicating whether the ring is valid or not.
     public func confirmRing(callId: String,calleeId: String, calleeDeviceId: String, is_valid: Bool) {
+        return
+        /*
         if callId.isEmpty || calleeId.isEmpty || calleeDeviceId.isEmpty {
             consoleLogInfo("Invalid parameters for confirming ring: callId: \(callId), calleeId: \(calleeId), calleeDeviceId: \(calleeDeviceId)", type: .error)
             self.handleBusinessError(CallError.CallBusiness(error: .signaling, message: "Invalid parameters for confirming ring"))
@@ -1416,6 +1716,7 @@ extension CallKitManager: CallMessageService {
                 consoleLogInfo("Failed to send confirm ring message: \(String(describing: error.errorDescription))", type: .error)
             }
         }
+        */
     }
     
     /// Confirm the answer to a call from the caller.
@@ -1425,6 +1726,8 @@ extension CallKitManager: CallMessageService {
     ///   - calleeDeviceId: The device ID of the callee.
     ///   - result: The result of the call, such as "accept", "busy", or "refuse".
     public func callerConfirmAnswer(callId: String,calleeId: String,calleeDeviceId: String,result: String) {
+        return
+        /*
         
         if callId.isEmpty || calleeId.isEmpty || calleeDeviceId.isEmpty || result.isEmpty {
             consoleLogInfo("Invalid parameters for confirming answer: callId: \(callId), calleeId: \(calleeId), calleeDeviceId: \(calleeDeviceId), result: \(result)", type: .error)
@@ -1454,6 +1757,7 @@ extension CallKitManager: CallMessageService {
                 consoleLogInfo("Failed to send confirm answer message: \(String(describing: error.errorDescription))", type: .error)
             }
         }
+        */
     }
     
     /// Answer an incoming call.
@@ -1463,6 +1767,33 @@ extension CallKitManager: CallMessageService {
     ///   - result: The result of the call, such as "accept", "busy", or "refuse".
     ///   - callerDeviceId: The device ID of the caller.
     func answerCall(callId: String,callerId: String,result: String,callerDeviceId: String) {
+        guard let manager = signalingManager else {
+            handleBusinessError(CallError.CallBusiness(error: .signaling, message: "Call signaling manager is unavailable"))
+            return
+        }
+        let completion: CallCompletion = { [weak self] _, error in
+            guard let self else { return }
+            if let error { self.notifySignalingError(error); return }
+            if result == kAcceptResult, let call = self.callInfo, call.callId == callId {
+                self.startConfirmBuildConnectionTimer(callId: callId)
+                self.joinChannel(channelName: call.channelName) { [weak self] success in
+                    guard let self else { return }
+                    if success {
+                        self.callInfo?.state = .answering
+                        self.presentCalleeController(call: call)
+                    } else {
+                        self.hangup()
+                    }
+                }
+            }
+        }
+        if result == kAcceptResult {
+            manager.acceptCall(callId, completion: completion)
+        } else {
+            manager.rejectCall(callId, reason: result == kBusyResult ? .busy : .declined, completion: completion)
+        }
+        return
+        /*
         consoleLogInfo("Answer call with ID: \(callId), caller ID: \(callerId), result: \(result), caller device ID: \(callerDeviceId)", type: .info)
         if callId.isEmpty || callerId.isEmpty || result.isEmpty || callerDeviceId.isEmpty {
             consoleLogInfo("Invalid parameters for answering call:\ncallId: \(callId), callerId: \(callerId), result: \(result), callerDeviceId: \(callerDeviceId)", type: .error)
@@ -1497,6 +1828,7 @@ extension CallKitManager: CallMessageService {
                 self.handleError(error)
             }
         }
+        */
     }
     
     public func hangup() {
@@ -1621,7 +1953,7 @@ extension CallKitManager: CallMessageService {
             guard let self = self else { return }
             do {
                 let credential = try await self.credentialForUse(reason: .join)
-                guard self.tokenProvider == nil || credential.uid > 0 else {
+                guard self.config.disableRTCTokenValidation || self.tokenProvider == nil || credential.uid > 0 else {
                     let message = "CallTokenProvider returned RTC UID 0; joining the RTC channel is not allowed."
                     consoleLogInfo(message, type: .error)
                     self.handleBusinessError(CallError.CallBusiness(error: .param, message: message))
@@ -1924,18 +2256,7 @@ extension CallKitManager: TimerServiceListener {
                     floating.updateSeconds(seconds: Int(seconds))
                 }
                 if seconds%updateDuration == 0 {
-                    if let messageId = self.callInfo?.inviteMessageId, let message = ChatClient.shared().chatManager?.getMessageWithMessageId(messageId) {
-                        let ext = message.ext ?? [:]
-                        var newExt = ext
-                        newExt[kCallDuration] = seconds
-                        message.ext = newExt
-                        Task {
-                            let result = await ChatClient.shared().chatManager?.update(message)
-                            if let error = result?.1 {
-                                consoleLogInfo("Failed to update call duration: \(String(describing: error.errorDescription))", type: .error)
-                            }
-                        }
-                    }
+                    // Call duration is kept in CallInfo; EMCallSignalingManager has no IM message to update.
                 }
             }
             

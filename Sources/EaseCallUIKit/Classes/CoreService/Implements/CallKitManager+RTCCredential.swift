@@ -140,6 +140,18 @@ extension CallKitManager {
     }
 
     func credentialForUse(reason: RTCCredentialRefreshReason) async throws -> RTCCredentialRecord {
+        // When RTC token validation is disabled, Agora can assign the UID and no
+        // credential request should be made just to obtain a token.
+        if config.disableRTCTokenValidation {
+            return RTCCredentialRecord(
+                appID: appID,
+                userID: ChatClient.shared().currentUsername ?? "",
+                uid: 0,
+                token: "",
+                expiration: 0,
+                generation: 0
+            )
+        }
         // CallKit uses an app-wide RTC credential; both sources are requested with a nil channel.
         if tokenProvider == nil {
             guard ChatClient.shared().isConnected else { throw RTCCredentialFailure.imNotConnected }

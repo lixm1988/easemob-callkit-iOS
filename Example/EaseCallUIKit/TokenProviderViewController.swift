@@ -99,6 +99,7 @@ final class TokenProviderViewController: UIViewController {
 
         let config = CallKitConfig()
         config.enablePIPOn1V1VideoScene = true
+        config.disableRTCTokenValidation = true
         // 新用法：把 CallTokenProvider 传给 CallKit。setup 时会立刻用 getAppId() 创建 RTC 引擎。
         CallKitManager.shared.setup(config, tokenProvider: tokenProvider)
         CallKitManager.shared.profileProvider = self

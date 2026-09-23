@@ -17,18 +17,23 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         // Override point for customization after application launch.
-        // 两种初始化路径只能选一种，RTC 引擎创建后不能切换。
-        // 旧用法（本 Example 默认）：用 AppKey 初始化 IM SDK，再 setup(config)。登录后由 IM SDK 下发 RTC 凭证。
-        // 新用法：同样用自己的 AppKey 初始化 IM SDK，但改走
-        // `CallKitManager.shared.setup(config, tokenProvider:)`，由 CallTokenProvider 提供 AppId / Token / uid 映射。
-        // 完整示例见 TokenProviderViewController。
+        // IM SDK 仍使用自己的 AppKey 初始化；RTC 凭证改由业务侧的 CallTokenProvider 提供。
         let option = ChatSDKOptions(appkey: AppKey)
         option.enableConsoleLog = true
-        option.isAutoLogin = false//此处只是示例项目，真实使用时参考环信Demo源码，自动登录更方便
+        option.setValue(false, forKey: "enableDnsConfig")
+        option.setValue("http://10.202.3.37:8083", forKey: "restServer")
+        option.setValue(false, forKey: "enableTLSConnection")
+        option.setValue("10.202.3.37", forKey: "chatServer")
+        option.setValue(4300, forKey: "chatPort")
+        option.setValue("10.202.3.37", forKey: "syncDataWSHost")
+        option.setValue(8081, forKey: "syncDataWSPort")
+        option.dataSyncType = [.joinedGroups, .conversations, .contacts]
         ChatClient.shared().initializeSDK(with: option)
         let config = CallKitConfig()
         config.enablePIPOn1V1VideoScene = true
-        CallKitManager.shared.setup(config)
+        // Example 使用无 RTC Token 校验模式，便于本地联调。
+        config.disableRTCTokenValidation = true
+        CallKitManager.shared.setup(config, tokenProvider: ExampleCallTokenProvider())
         return true
     }
 
@@ -56,4 +61,3 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
 
 }
-

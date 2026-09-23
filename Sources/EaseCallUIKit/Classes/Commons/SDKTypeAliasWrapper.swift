@@ -58,6 +58,15 @@ public typealias SilentModeResult = EMSilentModeResult
 public typealias SilentModeParam = EMSilentModeParam
 public typealias Contact = EMContact
 public typealias UserInfoType = EMUserInfoType
+public typealias CallSignalingManager = IEMCallSignalingManager
+public typealias CallSignalingManagerDelegate = EMCallSignalingManagerDelegate
+public typealias CallSignalingKind = EMCallKind
+public typealias CallSignalingMediaType = EMCallMediaType
+public typealias CallSignalingEndReason = EMCallEndReason
+public typealias CallSignalingParticipant = EMCallParticipant
+public typealias CallSignalingOtherDeviceHandleType = EMCallOtherDeviceHandleType
+public typealias CallCreateRequest = EMCreateCallRequest
+public typealias CallCompletion = EMCallCompletion
 public typealias GroupChatThreadListener = EMThreadManagerDelegate
 public typealias GroupChatThreadEvent = EMChatThreadEvent
 public typealias GroupChatThread = EMChatThread
@@ -116,4 +125,3 @@ public typealias MessagePinOperation = AgoraChatMessagePinOperation
 public typealias MessagePinInfo = AgoraChatMessagePinInfo
 public typealias LoginExtensionInfo = AgoraChatLoginExtensionInfo
 #endif
-

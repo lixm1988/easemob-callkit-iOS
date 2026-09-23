@@ -16,12 +16,17 @@ class ViewController: UIViewController {
     var callType: CallType = .singleAudio
 
     @IBOutlet var inputField: UITextField!
+    @IBOutlet weak var userIdField: UITextField!
+    @IBOutlet weak var passwordField: UITextField!
         
     @IBOutlet var callButton: UIButton!
     @IBOutlet weak var loginButton: UIButton!
+    @IBOutlet weak var logoutButton: UIButton!
     @IBOutlet weak var callTypeSegment: UISegmentedControl!
     @IBOutlet weak var logButton: UIButton!
     @IBOutlet weak var tokenProviderButton: UIButton!
+
+    private var isLoggedIn = false
 
     
     override func viewDidLoad() {
@@ -29,6 +34,9 @@ class ViewController: UIViewController {
         // Do any additional setup after loading the view, typically from a nib.
         self.callTypeSegment.selectedSegmentIndex = 0
         self.callTypeSegment.selectedSegmentTintColor = .systemBlue
+        self.passwordField.isSecureTextEntry = true
+        self.setCallControlsEnabled(false)
+        self.logoutButton.isEnabled = false
         CallKitManager.shared.profileProvider = self
         CallKitManager.shared.addListener(self)
     }
@@ -36,10 +44,10 @@ class ViewController: UIViewController {
     /// 跳转到 CallTokenProvider 新用法示例页。
     /// 该页会用你自己的声网 AppId 初始化 CallKit，并由业务服务器提供 RTC Token 与 uid↔userId 映射。
     @IBAction func tokenProviderAction(_ sender: Any) {
-        let controller = TokenProviderViewController()
-        let navigation = UINavigationController(rootViewController: controller)
-        navigation.modalPresentationStyle = .fullScreen
-        present(navigation, animated: true)
+//        let controller = TokenProviderViewController()
+//        let navigation = UINavigationController(rootViewController: controller)
+//        navigation.modalPresentationStyle = .fullScreen
+//        present(navigation, animated: true)
     }
     
     override func viewDidAppear(_ animated: Bool) {
@@ -57,22 +65,47 @@ class ViewController: UIViewController {
     
     @IBAction func loginAction(_ sender: Any) {
         self.view.endEditing(true)
-        
-        ChatClient.shared().login(withUsername: userId, token: token) { [weak self] userId,error  in
-            if let error = error {
-                self?.showCallToast(toast: "Login failed: \(error.errorDescription ?? "")")
-            } else {
-                self?.showCallToast(toast: "Login successful")
-                if !userId.isEmpty {
-                    let profile = CallUserProfile()
-                    profile.id = userId
-                    profile.avatarURL = "https://xxxxx"
-                    profile.nickname = "\(userId)昵称"
-                    CallKitManager.shared.currentUserInfo = profile
-                }
-                self?.loginButton.isHidden = true 
-            }
+        let username = userIdField.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let password = passwordField.text ?? ""
+        guard !username.isEmpty, !password.isEmpty else {
+            self.showCallToast(toast: "Please enter user ID and password")
+            return
         }
+        let ret = ChatClient.shared()
+            .perform(NSSelectorFromString("loginWithUsername:password:"), with: username, with: password)?
+            .takeUnretainedValue() as? ChatError
+        if let error = ret {
+            self.showCallToast(toast: "Login failed: \(error.errorDescription ?? "")")
+        } else {
+            self.showCallToast(toast: "Login successful")
+            if !username.isEmpty {
+                let profile = CallUserProfile()
+                profile.id = username
+                profile.avatarURL = "https://xxxxx"
+                profile.nickname = "\(username)昵称"
+                CallKitManager.shared.currentUserInfo = profile
+            }
+            self.isLoggedIn = true
+            self.setCallControlsEnabled(true)
+            self.loginButton.isEnabled = false
+            self.logoutButton.isEnabled = true
+        }
+    }
+
+    @IBAction func logoutAction(_ sender: Any) {
+        self.view.endEditing(true)
+        let error = ChatClient.shared().logout(false)
+        if let error = error {
+            self.showCallToast(toast: "Logout failed: \(error.errorDescription ?? "")")
+            return
+        }
+        CallKitManager.shared.cleanUserDefaults()
+        CallKitManager.shared.currentUserInfo = nil
+        isLoggedIn = false
+        setCallControlsEnabled(false)
+        loginButton.isEnabled = true
+        logoutButton.isEnabled = false
+        showCallToast(toast: "Logout successful")
     }
     
     @IBAction func logAction(_ sender: Any) {
@@ -83,6 +116,10 @@ class ViewController: UIViewController {
     
     @IBAction func callAction(_ sender: Any) {
         self.view.endEditing(true)
+        guard isLoggedIn else {
+            self.showCallToast(toast: "Please login before starting a call")
+            return
+        }
         guard let input = inputField.text?.trimmingCharacters(in: .whitespacesAndNewlines), !input.isEmpty else {
             self.showCallToast(toast: "Please enter a valid username or group id")
             return
@@ -90,8 +127,14 @@ class ViewController: UIViewController {
         if self.callType != .groupCall {
             CallKitManager.shared.call(with: input, type: self.callType)
         } else {
-            CallKitManager.shared.groupCall(groupId: input)
+            CallKitManager.shared.groupCall(groupId: "325839719825409")
         }
+    }
+
+    private func setCallControlsEnabled(_ enabled: Bool) {
+        callTypeSegment.isEnabled = enabled
+        inputField.isEnabled = enabled
+        callButton.isEnabled = enabled
     }
 }
 
@@ -183,7 +226,7 @@ extension ViewController: CallUserProfileProvider {
                 let profile = CallUserProfile()
                 profile.id = groupId
                 profile.nickname = group.groupName
-                profile.avatarURL = group.settings.ext
+                profile.avatarURL = group.settings.ext ?? ""
                 resultProfiles.append(profile)
             }
 

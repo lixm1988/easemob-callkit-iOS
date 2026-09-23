@@ -20,6 +20,18 @@
                         <rect key="frame" x="0.0" y="0.0" width="375" height="667"/>
                         <autoresizingMask key="autoresizingMask" flexibleMaxX="YES" flexibleMaxY="YES"/>
                         <subviews>
+                            <textField opaque="NO" contentMode="scaleToFill" horizontalHuggingPriority="248" contentHorizontalAlignment="left" contentVerticalAlignment="center" borderStyle="roundedRect" placeholder="User ID" translatesAutoresizingMaskIntoConstraints="NO" id="user-id-field">
+                                <rect key="frame" x="40" y="70" width="295" height="40"/>
+                                <constraints><constraint firstAttribute="height" constant="40" id="user-id-height"/></constraints>
+                                <fontDescription key="fontDescription" type="system" pointSize="17"/>
+                                <textInputTraits key="textInputTraits"/>
+                            </textField>
+                            <textField opaque="NO" contentMode="scaleToFill" horizontalHuggingPriority="248" contentHorizontalAlignment="left" contentVerticalAlignment="center" borderStyle="roundedRect" placeholder="Password" translatesAutoresizingMaskIntoConstraints="NO" id="password-field">
+                                <rect key="frame" x="40" y="120" width="295" height="40"/>
+                                <constraints><constraint firstAttribute="height" constant="40" id="password-height"/></constraints>
+                                <fontDescription key="fontDescription" type="system" pointSize="17"/>
+                                <textInputTraits key="textInputTraits" secureTextEntry="YES"/>
+                            </textField>
                             <textField opaque="NO" contentMode="scaleToFill" horizontalHuggingPriority="248" contentHorizontalAlignment="left" contentVerticalAlignment="center" borderStyle="roundedRect" placeholder="call user or group with id" textAlignment="center" minimumFontSize="17" translatesAutoresizingMaskIntoConstraints="NO" id="laE-OW-CWK">
                                 <rect key="frame" x="75" y="191" width="225" height="40"/>
                                 <color key="backgroundColor" systemColor="systemGray5Color"/>
@@ -51,6 +63,13 @@
                                 <connections>
                                     <action selector="loginAction:" destination="vXZ-lx-hvc" eventType="touchUpInside" id="D5E-pO-2Jw"/>
                                 </connections>
+                            </button>
+                            <button opaque="NO" contentMode="scaleToFill" contentHorizontalAlignment="center" contentVerticalAlignment="center" buttonType="system" lineBreakMode="middleTruncation" translatesAutoresizingMaskIntoConstraints="NO" id="logout-button">
+                                <rect key="frame" x="210" y="180" width="80" height="35"/>
+                                <constraints><constraint firstAttribute="height" constant="35" id="logout-height"/></constraints>
+                                <state key="normal" title="Button"/>
+                                <buttonConfiguration key="configuration" style="filled" title="Logout"/>
+                                <connections><action selector="logoutAction:" destination="vXZ-lx-hvc" eventType="touchUpInside" id="logout-action"/></connections>
                             </button>
                             <segmentedControl opaque="NO" contentMode="scaleToFill" contentHorizontalAlignment="center" contentVerticalAlignment="top" segmentControlStyle="plain" selectedSegmentIndex="0" translatesAutoresizingMaskIntoConstraints="NO" id="KgU-kb-zgq">
                                 <rect key="frame" x="89" y="129" width="197" height="32"/>
@@ -94,26 +113,37 @@
                         </subviews>
                         <color key="backgroundColor" red="1" green="1" blue="1" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
                         <constraints>
-                            <constraint firstItem="zid-qi-Z7H" firstAttribute="centerX" secondItem="kh9-bI-dsS" secondAttribute="centerX" id="3PV-gJ-xUs"/>
-                            <constraint firstItem="zid-qi-Z7H" firstAttribute="top" secondItem="laE-OW-CWK" secondAttribute="bottom" constant="23" id="3d9-xN-rVV"/>
-                            <constraint firstItem="KgU-kb-zgq" firstAttribute="top" secondItem="jyV-Pf-zRb" secondAttribute="bottom" constant="109" id="3iR-bE-dsH"/>
-                            <constraint firstItem="1TW-7c-QOv" firstAttribute="centerX" secondItem="kh9-bI-dsS" secondAttribute="centerX" id="7qi-nX-Ep7"/>
+                            <constraint firstItem="user-id-field" firstAttribute="top" secondItem="jyV-Pf-zRb" secondAttribute="bottom" constant="28" id="user-id-top"/>
+                            <constraint firstItem="user-id-field" firstAttribute="leading" secondItem="kh9-bI-dsS" secondAttribute="leading" constant="40" id="user-id-leading"/>
+                            <constraint firstItem="user-id-field" firstAttribute="trailing" secondItem="kh9-bI-dsS" secondAttribute="trailing" constant="-40" id="user-id-trailing"/>
+                            <constraint firstItem="password-field" firstAttribute="top" secondItem="user-id-field" secondAttribute="bottom" constant="10" id="password-top"/>
+                            <constraint firstItem="password-field" firstAttribute="leading" secondItem="user-id-field" secondAttribute="leading" id="password-leading"/>
+                            <constraint firstItem="password-field" firstAttribute="trailing" secondItem="user-id-field" secondAttribute="trailing" id="password-trailing"/>
+                            <constraint firstItem="1TW-7c-QOv" firstAttribute="top" secondItem="password-field" secondAttribute="bottom" constant="15" id="login-top"/>
+                            <constraint firstItem="1TW-7c-QOv" firstAttribute="trailing" secondItem="kh9-bI-dsS" secondAttribute="centerX" constant="-5" id="login-trailing"/>
+                            <constraint firstItem="logout-button" firstAttribute="top" secondItem="password-field" secondAttribute="bottom" constant="15" id="logout-top"/>
+                            <constraint firstItem="logout-button" firstAttribute="leading" secondItem="kh9-bI-dsS" secondAttribute="centerX" constant="5" id="logout-leading"/>
+                            <constraint firstItem="KgU-kb-zgq" firstAttribute="top" secondItem="1TW-7c-QOv" secondAttribute="bottom" constant="28" id="segment-top"/>
                             <constraint firstItem="KgU-kb-zgq" firstAttribute="centerX" secondItem="kh9-bI-dsS" secondAttribute="centerX" id="PaT-sj-EOF"/>
-                            <constraint firstItem="0Qd-2k-2aV" firstAttribute="centerX" secondItem="kh9-bI-dsS" secondAttribute="centerX" id="Ptx-cV-DpW"/>
+                            <constraint firstItem="laE-OW-CWK" firstAttribute="top" secondItem="KgU-kb-zgq" secondAttribute="bottom" constant="15" id="input-top"/>
                             <constraint firstItem="laE-OW-CWK" firstAttribute="centerX" secondItem="kh9-bI-dsS" secondAttribute="centerX" id="ZDm-c5-ZIK"/>
-                            <constraint firstItem="1TW-7c-QOv" firstAttribute="centerY" secondItem="kh9-bI-dsS" secondAttribute="centerY" id="a05-e3-vQV"/>
-                            <constraint firstItem="0Qd-2k-2aV" firstAttribute="top" secondItem="1TW-7c-QOv" secondAttribute="bottom" constant="19" id="r8t-en-w10"/>
-                            <constraint firstItem="tpk-PV-btn" firstAttribute="centerX" secondItem="kh9-bI-dsS" secondAttribute="centerX" id="tpk-cx-01"/>
+                            <constraint firstItem="zid-qi-Z7H" firstAttribute="top" secondItem="laE-OW-CWK" secondAttribute="bottom" constant="15" id="call-top"/>
+                            <constraint firstItem="zid-qi-Z7H" firstAttribute="centerX" secondItem="kh9-bI-dsS" secondAttribute="centerX" id="3PV-gJ-xUs"/>
+                            <constraint firstItem="0Qd-2k-2aV" firstAttribute="top" secondItem="zid-qi-Z7H" secondAttribute="bottom" constant="15" id="log-top"/>
+                            <constraint firstItem="0Qd-2k-2aV" firstAttribute="centerX" secondItem="kh9-bI-dsS" secondAttribute="centerX" id="Ptx-cV-DpW"/>
                             <constraint firstItem="tpk-PV-btn" firstAttribute="top" secondItem="0Qd-2k-2aV" secondAttribute="bottom" constant="16" id="tpk-top-01"/>
-                            <constraint firstItem="laE-OW-CWK" firstAttribute="top" secondItem="jyV-Pf-zRb" secondAttribute="bottom" constant="171" id="vBn-aQ-3Q3"/>
+                            <constraint firstItem="tpk-PV-btn" firstAttribute="centerX" secondItem="kh9-bI-dsS" secondAttribute="centerX" id="tpk-cx-01"/>
                         </constraints>
                     </view>
                     <connections>
                         <outlet property="callButton" destination="zid-qi-Z7H" id="Awl-9Z-oQR"/>
                         <outlet property="callTypeSegment" destination="KgU-kb-zgq" id="wvg-RC-nDZ"/>
                         <outlet property="inputField" destination="laE-OW-CWK" id="jPc-mR-gs4"/>
+                        <outlet property="userIdField" destination="user-id-field" id="user-id-outlet"/>
+                        <outlet property="passwordField" destination="password-field" id="password-outlet"/>
                         <outlet property="logButton" destination="0Qd-2k-2aV" id="7P1-p7-nd8"/>
                         <outlet property="loginButton" destination="1TW-7c-QOv" id="xVW-DO-dD2"/>
+                        <outlet property="logoutButton" destination="logout-button" id="logout-outlet"/>
                         <outlet property="tokenProviderButton" destination="tpk-PV-btn" id="tpk-out-01"/>
                     </connections>
                 </viewController>

@@ -136,8 +136,8 @@ public let CallKitVersion = "5.0.0"
     @objc public func setup(_ config: CallKitConfig? = nil) {
         ChatClient.shared().removeDelegate(self)
         ChatClient.shared().add(self, delegateQueue: nil)
-        ChatClient.shared().chatManager?.remove(self)
-        ChatClient.shared().chatManager?.add(self, delegateQueue: .main)
+        ChatClient.shared().callSignalingManager?.remove(self)
+        ChatClient.shared().callSignalingManager?.add(self, delegateQueue: .main)
         if let config = config {
             self.config = config
         }
@@ -371,7 +371,7 @@ public let CallKitVersion = "5.0.0"
             consoleLogInfo("Failed to deactivate audio session: \(error.localizedDescription)", type: .error)
         }
         ChatClient.shared().removeDelegate(self)
-        ChatClient.shared().chatManager?.remove(self)
+        ChatClient.shared().callSignalingManager?.remove(self)
         notificationObservers.forEach { NotificationCenter.default.removeObserver($0) }
         notificationObservers.removeAll()
         $rtcCredentialCache.modify { $0 = nil }

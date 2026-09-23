@@ -13,6 +13,8 @@
 		607FACDB1AFB9204008FA782 /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 607FACD91AFB9204008FA782 /* Main.storyboard */; };
 		607FACDD1AFB9204008FA782 /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 607FACDC1AFB9204008FA782 /* Images.xcassets */; };
 		607FACE01AFB9204008FA782 /* LaunchScreen.xib in Resources */ = {isa = PBXBuildFile; fileRef = 607FACDE1AFB9204008FA782 /* LaunchScreen.xib */; };
+		A1B2C3D40123456789ABCDEF /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D30123456789ABCDEF /* SceneDelegate.swift */; };
+		B024E8D130624A6D009D213E /* TokenProviderViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = B024E8D030624A6D009D213E /* TokenProviderViewController.swift */; };
 		B55A349524957CA415BDEA11 /* Pods_EaseCallUIKit_Example.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4CF4BD3D6F5267BC6DD9EE52 /* Pods_EaseCallUIKit_Example.framework */; };
 /* End PBXBuildFile section */
 
@@ -30,8 +32,10 @@
 		607FACDA1AFB9204008FA782 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
 		607FACDC1AFB9204008FA782 /* Images.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Images.xcassets; sourceTree = "<group>"; };
 		607FACDF1AFB9204008FA782 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.xib; name = Base; path = Base.lproj/LaunchScreen.xib; sourceTree = "<group>"; };
+		A1B2C3D30123456789ABCDEF /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
 		A4B70DE3472BF0EF4BD06D31 /* Pods-EaseCallUIKit_Example.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-EaseCallUIKit_Example.debug.xcconfig"; path = "Target Support Files/Pods-EaseCallUIKit_Example/Pods-EaseCallUIKit_Example.debug.xcconfig"; sourceTree = "<group>"; };
 		AE50C492F63AFEB6A0BA2560 /* Pods-EaseCallUIKit_Example.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-EaseCallUIKit_Example.release.xcconfig"; path = "Target Support Files/Pods-EaseCallUIKit_Example/Pods-EaseCallUIKit_Example.release.xcconfig"; sourceTree = "<group>"; };
+		B024E8D030624A6D009D213E /* TokenProviderViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenProviderViewController.swift; sourceTree = "<group>"; };
 		C1B543EF25118802E5F08574 /* README.md */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = net.daringfireball.markdown; name = README.md; path = ../README.md; sourceTree = "<group>"; };
 		DF4DD80F37D3BA2E35A7B552 /* Pods_EaseCallUIKit_Tests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_EaseCallUIKit_Tests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		E31216C2A32C11371FEB96BB /* Pods-EaseCallUIKit_Tests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-EaseCallUIKit_Tests.release.xcconfig"; path = "Target Support Files/Pods-EaseCallUIKit_Tests/Pods-EaseCallUIKit_Tests.release.xcconfig"; sourceTree = "<group>"; };
@@ -84,6 +88,8 @@
 			isa = PBXGroup;
 			children = (
 				607FACD51AFB9204008FA782 /* AppDelegate.swift */,
+				A1B2C3D30123456789ABCDEF /* SceneDelegate.swift */,
+				B024E8D030624A6D009D213E /* TokenProviderViewController.swift */,
 				607FACD71AFB9204008FA782 /* ViewController.swift */,
 				052732DF2E4D7E1100FA37DA /* PublicDefines.swift */,
 				607FACD91AFB9204008FA782 /* Main.storyboard */,
@@ -243,21 +249,23 @@
 			);
 			inputPaths = (
 				"${PODS_ROOT}/Target Support Files/Pods-EaseCallUIKit_Example/Pods-EaseCallUIKit_Example-frameworks.sh",
-				"${PODS_XCFRAMEWORKS_BUILD_DIR}/AgoraInfra_iOS/aosl.framework/aosl",
-				"${PODS_XCFRAMEWORKS_BUILD_DIR}/AgoraRtcEngine_iOS/RtcBasic/AgoraRtcKit.framework/AgoraRtcKit",
-				"${PODS_XCFRAMEWORKS_BUILD_DIR}/AgoraRtcEngine_iOS/RtcBasic/Agorafdkaac.framework/Agorafdkaac",
-				"${PODS_XCFRAMEWORKS_BUILD_DIR}/AgoraRtcEngine_iOS/RtcBasic/Agoraffmpeg.framework/Agoraffmpeg",
-				"${PODS_XCFRAMEWORKS_BUILD_DIR}/AgoraRtcEngine_iOS/RtcBasic/AgoraSoundTouch.framework/AgoraSoundTouch",
 				"${PODS_XCFRAMEWORKS_BUILD_DIR}/HyphenateChat/HyphenateChat.framework/HyphenateChat",
+				"${PODS_XCFRAMEWORKS_BUILD_DIR}/ShengwangInfra_iOS/aosl.framework/aosl",
+				"${PODS_XCFRAMEWORKS_BUILD_DIR}/ShengwangRtcEngine_iOS/RtcBasic/AgoraRtcKit.framework/AgoraRtcKit",
+				"${PODS_XCFRAMEWORKS_BUILD_DIR}/ShengwangRtcEngine_iOS/RtcBasic/Agorafdkaac.framework/Agorafdkaac",
+				"${PODS_XCFRAMEWORKS_BUILD_DIR}/ShengwangRtcEngine_iOS/RtcBasic/Agoraffmpeg.framework/Agoraffmpeg",
+				"${PODS_XCFRAMEWORKS_BUILD_DIR}/ShengwangRtcEngine_iOS/RtcBasic/AgoraSoundTouch.framework/AgoraSoundTouch",
+				"${PODS_XCFRAMEWORKS_BUILD_DIR}/ShengwangRtcEngine_iOS/RtcBasic/video_dec.framework/video_dec",
 			);
 			name = "[CP] Embed Pods Frameworks";
 			outputPaths = (
+				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/HyphenateChat.framework",
 				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/aosl.framework",
 				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/AgoraRtcKit.framework",
 				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/Agorafdkaac.framework",
 				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/Agoraffmpeg.framework",
 				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/AgoraSoundTouch.framework",
-				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/HyphenateChat.framework",
+				"${TARGET_BUILD_DIR}/${FRAMEWORKS_FOLDER_PATH}/video_dec.framework",
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
@@ -273,7 +281,9 @@
 			files = (
 				607FACD81AFB9204008FA782 /* ViewController.swift in Sources */,
 				052732E02E4D7E1100FA37DA /* PublicDefines.swift in Sources */,
+				B024E8D130624A6D009D213E /* TokenProviderViewController.swift in Sources */,
 				607FACD61AFB9204008FA782 /* AppDelegate.swift in Sources */,
+				A1B2C3D40123456789ABCDEF /* SceneDelegate.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
