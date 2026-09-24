@@ -67,7 +67,9 @@ extension GlobalTimerManager: TimerService {
             }
 
             self.listeners.add(listener)
-            self.timerCache[timerIdentify] = Date().timeIntervalSince1970
+            if self.timerCache[timerIdentify] == nil {
+                self.timerCache[timerIdentify] = Date().timeIntervalSince1970
+            }
             
             if self.globalTimer == nil {
                 // 确保Timer在主线程创建和运行
