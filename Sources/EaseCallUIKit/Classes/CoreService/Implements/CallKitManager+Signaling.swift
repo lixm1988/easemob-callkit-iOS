@@ -158,16 +158,22 @@ extension CallKitManager: CallSignalingManagerDelegate {
             call.inviteUsers = participants
                 .filter { $0.state != .left && $0.state != .rejected && $0.state != .canceled && $0.state != .timeout && $0.state != .hanguped }
                 .map(\.userId)
+            var addedItem = false
             for participant in participants where participant.state == .accepted {
-                if self.itemsCache[participant.userId] == nil {
-                    let item = CallStreamItem(userId: participant.userId, index: self.itemsCache.count + 1, isExpanded: false)
-                    item.waiting = false
-                    self.itemsCache[participant.userId] = item
+                let item: CallStreamItem
+                if let existingItem = self.itemsCache[participant.userId] {
+                    item = existingItem
                 } else {
-                    self.itemsCache[participant.userId]?.waiting = false
+                    item = CallStreamItem(userId: participant.userId, index: self.itemsCache.count + 1, isExpanded: false)
+                    self.itemsCache[participant.userId] = item
+                    addedItem = true
                 }
+                item.waiting = false
+                self.canvasCache[participant.userId]?.updateItem(item)
             }
-            (UIViewController.currentController as? CallMultiViewController)?.callView.updateWithItems()
+            if addedItem {
+                (UIViewController.currentController as? CallMultiViewController)?.callView.updateWithItems()
+            }
             let activeUsers = Set(participants.filter {
                 $0.state != .left && $0.state != .rejected && $0.state != .canceled &&
                 $0.state != .timeout && $0.state != .hanguped
@@ -181,22 +187,38 @@ extension CallKitManager: CallSignalingManagerDelegate {
                 self.canvasCache[userId]?.removeFromSuperview()
                 self.canvasCache.removeValue(forKey: userId)
             }
-            (UIViewController.currentController as? CallMultiViewController)?.callView.updateWithItems(removedUsers)
+            if !removedUsers.isEmpty {
+                (UIViewController.currentController as? CallMultiViewController)?.callView.updateWithItems(removedUsers)
+            }
         }
     }
 
-    private func updateCallStateFromParticipants(call: CallInfo, state: CallState) {
+    func updateCallStateFromParticipants(call: CallInfo, state: CallState) {
+        if call.state == .answering && state != .answering { return }
         guard call.state != state else { return }
-        if state == .answering {
-            self.stopInvitationSignalTimer(callId: call.callId)
-            self.stopConfirmBuildConnectionTimer(callId: call.callId)
-            self.callStartTimerStop(callId: call.callId)
-            if call.state != .answering {
-                (self.callVC as? Call1v1AudioViewController)?.addCallTimer()
-                (self.callVC as? Call1v1VideoViewController)?.addCallTimer()
-            }
-        }
+        let shouldEnterAnswering = CallConnectionTransitionPolicy.shouldEnterAnswering(
+            isAnswering: call.state == .answering,
+            hasAcceptedParticipant: state == .answering
+        )
         call.state = state
+        guard shouldEnterAnswering else { return }
+
+        self.stopInvitationSignalTimer(callId: call.callId)
+        self.stopConfirmBuildConnectionTimer(callId: call.callId)
+        self.stopRingTimer(callId: call.callId)
+        self.callStartTimerStop(callId: call.callId)
+
+        func addCallTimer(to controller: UIViewController?) {
+            (controller as? Call1v1AudioViewController)?.addCallTimer()
+            (controller as? Call1v1VideoViewController)?.addCallTimer()
+            (controller as? CallMultiViewController)?.addCallTimer()
+        }
+
+        let currentController = UIViewController.currentController
+        addCallTimer(to: currentController)
+        if let callVC = self.callVC, callVC !== currentController {
+            addCallTimer(to: callVC)
+        }
     }
 
     private func endReasonForParticipant(_ state: Int, local: Bool) -> CallEndReason {
@@ -1779,7 +1801,8 @@ extension CallKitManager: CallMessageService {
                 self.joinChannel(channelName: call.channelName) { [weak self] success in
                     guard let self else { return }
                     if success {
-                        self.callInfo?.state = .answering
+                        self.stopConfirmBuildConnectionTimer(callId: callId)
+                        self.updateCallStateFromParticipants(call: call, state: .answering)
                         self.presentCalleeController(call: call)
                     } else {
                         self.hangup()

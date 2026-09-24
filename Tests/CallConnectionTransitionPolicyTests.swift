@@ -7,10 +7,12 @@ enum CallConnectionTransitionPolicyTests {
             isAnswering: false,
             hasAcceptedParticipant: true
         ))
-        precondition(!CallConnectionTransitionPolicy.shouldEnterAnswering(
-            isAnswering: true,
-            hasAcceptedParticipant: true
-        ))
+        for _ in 0..<3 {
+            precondition(!CallConnectionTransitionPolicy.shouldEnterAnswering(
+                isAnswering: true,
+                hasAcceptedParticipant: true
+            ))
+        }
         precondition(!CallConnectionTransitionPolicy.shouldEnterAnswering(
             isAnswering: false,
             hasAcceptedParticipant: false

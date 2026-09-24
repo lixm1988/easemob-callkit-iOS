@@ -89,7 +89,9 @@ open class CallMultiViewController: UIViewController {
         let state = self.connected
         self.view.addSubViews([self.background, self.navigationBar,self.bottomView,self.callView])
         if state {
-            self.addCallTimer()
+            if CallKitManager.shared.callInfo?.state == .answering {
+                self.addCallTimer()
+            }
             self.bottomView.isCallConnected = true
         } else {
             self.bottomView.isCallConnected = false
@@ -143,7 +145,6 @@ open class CallMultiViewController: UIViewController {
     private func setupNavigationState() {
         if self.role != .callee {
             self.navigationBar.subtitle = "calling".call.localize
-            self.addCallTimer()
         } else {
             if let call = CallKitManager.shared.callInfo {
                 switch call.state {
@@ -154,7 +155,6 @@ open class CallMultiViewController: UIViewController {
                     }
                 case .answering:
                     self.navigationBar.subtitle = "Connecting".call.localize
-                    self.addCallTimer()
                 default:
                     break
                 }
@@ -248,10 +248,6 @@ open class CallMultiViewController: UIViewController {
             self.removeLocalPreview()
             self.isCameraPreviewEnabled = false
 
-            if let call = CallKitManager.shared.callInfo {
-                GlobalTimerManager.shared.registerListener(self, timerIdentify: "call-\(call.channelName)-answering-timer")
-                GlobalTimerManager.shared.registerListener(CallKitManager.shared, timerIdentify: "call-\(call.channelName)-answering-timer")
-            }
             if #available(iOS 17.4, *),CallKitManager.shared.config.enableVOIP {
                 if LiveCommunicationManager.shared.manager != nil {
                     CallKitManager.shared.updateLiveCommunicationStateIfNeeded()
