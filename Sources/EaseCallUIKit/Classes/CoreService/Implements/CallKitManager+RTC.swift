@@ -306,7 +306,9 @@ extension CallKitManager: AgoraRtcEngineDelegate {
         //Setting remote video render qutity for the user who just joined
         if let call = self.callInfo,!call.callId.isEmpty {
             if call.callerId == ChatClient.shared().currentUsername ?? "" {
-                call.state = .answering
+                self.performRTCUIUpdate {
+                    self.updateCallStateFromParticipants(call: call, state: .answering)
+                }
             }
             if call.type == .groupCall {
                 DispatchQueue.main.async {
@@ -350,7 +352,7 @@ extension CallKitManager: AgoraRtcEngineDelegate {
                                 if let streamView = self.canvasCache[userId],let item = self.itemsCache[userId]  {
                                     item.uid = UInt32(truncating: uidKey)
                                     item.waiting = false
-                                    streamView.updateUserInfo(newItem: item)
+                                    streamView.updateItem(item)
                                     consoleLogInfo("rtcEngine didJoinedOfUid: setRemoteVideoStream userId:\(userId) uidKey:\(uidKey) uidNotFound:\(uidNotFound) userIdNotFound:\(userIdNotFound)", type: .debug)
                                 } else {
                                     userIdNotFound = true
@@ -359,7 +361,7 @@ extension CallKitManager: AgoraRtcEngineDelegate {
                                 if let first = self.itemsCache.values.first(where: { $0.uid == UInt32(truncating: uidKey) })  {
                                     first.uid = UInt32(truncating: uidKey)
                                     first.waiting = false
-                                    self.canvasCache[first.userId]?.updateUserInfo(newItem: first)
+                                    self.canvasCache[first.userId]?.updateItem(first)
                                     consoleLogInfo("rtcEngine didJoinedOfUid: setRemoteVideoStream userId:\(userId) uidKey:\(uidKey) uidNotFound:\(uidNotFound) userIdNotFound:\(userIdNotFound)", type: .debug)
                                 } else {
                                     uidNotFound = true
