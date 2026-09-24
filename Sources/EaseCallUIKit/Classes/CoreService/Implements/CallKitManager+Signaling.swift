@@ -1796,17 +1796,27 @@ extension CallKitManager: CallMessageService {
         let completion: CallCompletion = { [weak self] _, error in
             guard let self else { return }
             if let error { self.notifySignalingError(error); return }
-            if result == kAcceptResult, let call = self.callInfo, call.callId == callId {
-                self.startConfirmBuildConnectionTimer(callId: callId)
-                self.joinChannel(channelName: call.channelName) { [weak self] success in
-                    guard let self else { return }
-                    if success {
-                        self.stopConfirmBuildConnectionTimer(callId: callId)
-                        self.updateCallStateFromParticipants(call: call, state: .answering)
-                        self.presentCalleeController(call: call)
-                    } else {
-                        self.hangup()
+            if result == kAcceptResult {
+                let joinAcceptedCall = { [weak self] in
+                    guard let self, let call = self.callInfo, call.callId == callId else { return }
+                    if call.state != .answering {
+                        self.startConfirmBuildConnectionTimer(callId: callId)
                     }
+                    self.joinChannel(channelName: call.channelName) { [weak self] success in
+                        guard let self else { return }
+                        if success {
+                            self.stopConfirmBuildConnectionTimer(callId: callId)
+                            self.updateCallStateFromParticipants(call: call, state: .answering)
+                            self.presentCalleeController(call: call)
+                        } else {
+                            self.hangup()
+                        }
+                    }
+                }
+                if Thread.isMainThread {
+                    joinAcceptedCall()
+                } else {
+                    DispatchQueue.main.async(execute: joinAcceptedCall)
                 }
             }
         }
