@@ -306,7 +306,12 @@ extension CallKitManager: AgoraRtcEngineDelegate {
         //Setting remote video render qutity for the user who just joined
         if let call = self.callInfo,!call.callId.isEmpty {
             if call.callerId == ChatClient.shared().currentUsername ?? "" {
-                self.performRTCUIUpdate {
+                self.performRTCUIUpdate { [weak self] in
+                    guard let self,
+                          self.callInfo === call,
+                          !call.callId.isEmpty,
+                          !call.channelName.isEmpty,
+                          call.state != .idle else { return }
                     self.updateCallStateFromParticipants(call: call, state: .answering)
                 }
             }
