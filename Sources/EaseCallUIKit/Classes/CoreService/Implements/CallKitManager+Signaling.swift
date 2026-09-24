@@ -208,15 +208,42 @@ extension CallKitManager: CallSignalingManagerDelegate {
         self.stopRingTimer(callId: call.callId)
         self.callStartTimerStop(callId: call.callId)
 
+        let timerIdentify = "call-\(call.channelName)-answering-timer"
+        GlobalTimerManager.shared.registerListener(self, timerIdentify: timerIdentify)
+
         func addCallTimer(to controller: UIViewController?) {
             (controller as? Call1v1AudioViewController)?.addCallTimer()
             (controller as? Call1v1VideoViewController)?.addCallTimer()
             (controller as? CallMultiViewController)?.addCallTimer()
         }
 
-        let currentController = UIViewController.currentController
-        addCallTimer(to: currentController)
-        if let callVC = self.callVC, callVC !== currentController {
+        var visitedControllers = Set<ObjectIdentifier>()
+        func callController(in hierarchy: UIViewController?) -> UIViewController? {
+            guard let controller = hierarchy else { return nil }
+            guard visitedControllers.insert(ObjectIdentifier(controller)).inserted else { return nil }
+            if controller is Call1v1AudioViewController || controller is Call1v1VideoViewController || controller is CallMultiViewController {
+                return controller
+            }
+            if let navigationController = controller as? UINavigationController {
+                for childController in navigationController.viewControllers.reversed() {
+                    if let callController = callController(in: childController) {
+                        return callController
+                    }
+                }
+            }
+            if let tabController = controller as? UITabBarController,
+               let callController = callController(in: tabController.selectedViewController) {
+                return callController
+            }
+            if let callController = callController(in: controller.parent) {
+                return callController
+            }
+            return callController(in: controller.presentingViewController)
+        }
+
+        let visibleCallController = callController(in: UIViewController.currentController)
+        addCallTimer(to: visibleCallController)
+        if let callVC = self.callVC, callVC !== visibleCallController {
             addCallTimer(to: callVC)
         }
     }
@@ -1804,10 +1831,14 @@ extension CallKitManager: CallMessageService {
                     }
                     self.joinChannel(channelName: call.channelName) { [weak self] success in
                         guard let self else { return }
+                        guard let currentCall = self.callInfo,
+                              currentCall === call,
+                              currentCall.callId == callId,
+                              currentCall.state != .idle else { return }
                         if success {
                             self.stopConfirmBuildConnectionTimer(callId: callId)
-                            self.updateCallStateFromParticipants(call: call, state: .answering)
-                            self.presentCalleeController(call: call)
+                            self.updateCallStateFromParticipants(call: currentCall, state: .answering)
+                            self.presentCalleeController(call: currentCall)
                         } else {
                             self.hangup()
                         }
