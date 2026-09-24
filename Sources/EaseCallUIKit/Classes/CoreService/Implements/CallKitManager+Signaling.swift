@@ -155,9 +155,21 @@ extension CallKitManager: CallSignalingManagerDelegate {
                 }
             }
 
-            call.inviteUsers = participants
-                .filter { $0.state != .left && $0.state != .rejected && $0.state != .canceled && $0.state != .timeout && $0.state != .hanguped }
-                .map(\.userId)
+            if call.type == .groupCall {
+                let terminalUsers = Set(participants.filter {
+                    CallParticipantRemovalPolicy.isTerminal($0.state.rawValue)
+                }.map(\.userId))
+                call.inviteUsers.removeAll { terminalUsers.contains($0) }
+                for participant in participants where !CallParticipantRemovalPolicy.isTerminal(participant.state.rawValue) {
+                    if !call.inviteUsers.contains(participant.userId) {
+                        call.inviteUsers.append(participant.userId)
+                    }
+                }
+            } else {
+                call.inviteUsers = participants
+                    .filter { !CallParticipantRemovalPolicy.isTerminal($0.state.rawValue) }
+                    .map(\.userId)
+            }
             var addedItem = false
             for participant in participants where participant.state == .accepted {
                 let item: CallStreamItem
@@ -174,11 +186,20 @@ extension CallKitManager: CallSignalingManagerDelegate {
             if addedItem {
                 (UIViewController.currentController as? CallMultiViewController)?.callView.updateWithItems()
             }
-            let activeUsers = Set(participants.filter {
-                $0.state != .left && $0.state != .rejected && $0.state != .canceled &&
-                $0.state != .timeout && $0.state != .hanguped
-            }.map(\.userId))
-            let removedUsers = self.itemsCache.keys.filter { $0 != ChatClient.shared().currentUsername && !activeUsers.contains($0) }
+            if call.type == .groupCall {
+                for participant in participants where participant.state == .timeout {
+                    if let item = self.itemsCache[participant.userId], item.waiting {
+                        item.waiting = false
+                        self.canvasCache[participant.userId]?.updateItem(item)
+                    }
+                }
+            }
+            let reportedStates = participantByUserId.mapValues { $0.state.rawValue }
+            let removedUsers = call.type == .groupCall
+                ? Array(CallParticipantRemovalPolicy.usersToRemove(
+                    cachedUsers: Set(self.itemsCache.keys), currentUser: currentUserId,
+                    reportedStates: reportedStates))
+                : []
             for userId in removedUsers {
                 for listener in self.listeners.allObjects {
                     listener.remoteUserDidLeft?(userId: userId, channelName: call.channelName, type: call.type)
@@ -2326,32 +2347,16 @@ extension CallKitManager: TimerServiceListener {
             
         default:
             if timerIdentify.contains(" users:") {//群组中发起通话邀请成员超时
-                if seconds >= CallKitManager.shared.config.ringTimeOut {
-                    if call.type == .groupCall {
-                        if let currentVC = UIViewController.currentController as? CallMultiViewController {
-                            let inviteGroupUserTimerKeys = GlobalTimerManager.shared.timerCache.keys.filter { $0.components(separatedBy: " users:").count > 0 }
-                            var removeUsers: [String] = []
-                            for key in inviteGroupUserTimerKeys {
-                                if timerIdentify == key,seconds >= CallKitManager.shared.config.ringTimeOut {
-                                    let keyComponents = key.components(separatedBy: " users:")
-                                    let trails = keyComponents.last?.components(separatedBy: "-") ?? []
-                                    let users = trails.first?.components(separatedBy: ",") ?? []
-                                    for userId in users {
-                                        if let item = self.itemsCache[userId],item.waiting {
-                                            removeUsers.append(userId)
-                                            self.itemsCache.removeValue(forKey: userId)
-                                            self.canvasCache.removeValue(forKey: userId)
-                                            self.cancelCall(callId: call.callId, calleeId: userId)
-                                        }
-                                    }
-                                }
-                            }
-                            if !removeUsers.isEmpty {
-                                currentVC.callView.updateWithItems(removeUsers)
-                            }
-                            GlobalTimerManager.shared.removeTimeAsSimilarKey(timerIdentify)
-                        }
+                if seconds >= self.config.ringTimeOut, call.type == .groupCall {
+                    let waitingUsers = Set(self.itemsCache.compactMap { $0.value.waiting ? $0.key : nil })
+                    let users = GroupInviteTimeoutPolicy.usersToUnmask(
+                        timerIdentifier: timerIdentify, callID: call.callId, waitingUsers: waitingUsers)
+                    for userId in users {
+                        guard let item = self.itemsCache[userId] else { continue }
+                        item.waiting = false
+                        self.canvasCache[userId]?.updateItem(item)
                     }
+                    GlobalTimerManager.shared.removeTimeAsSimilarKey(timerIdentify)
                 }
             }
             

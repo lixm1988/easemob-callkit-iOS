@@ -777,56 +777,49 @@ extension CallKitManager: AgoraRtcEngineDelegate {
 
 extension CallKitManager: AgoraVideoFrameDelegate {
     public func onCapture(_ videoFrame: AgoraOutputVideoFrame, sourceType: AgoraVideoSourceType) -> Bool {// This method is called when local video frame is captured.
-        if let call = self.callInfo {
+        guard let pixelBuffer = PixelBufferRenderView.pixelBuffer(from: videoFrame) else { return true }
+        let width = videoFrame.width
+        let height = videoFrame.height
+        localVideoFrameMailbox.submit({ [weak self] in
+            guard let self, let call = self.callInfo else { return }
             // 处理群组通话预览（仅前台且当前显示的页面）
             if call.type == .groupCall {
                 if let controller = UIViewController.currentController as? CallMultiViewController,
                    controller.isCameraPreviewEnabled,
                    let previewView = controller.localPreviewView {
-                    if let pixelBuffer = videoFrame.pixelBuffer {
-                        previewView.renderVideoPixelBuffer(pixelBuffer: pixelBuffer, width: videoFrame.width, height: videoFrame.height)
-                    } else {
-                        previewView.renderFromVideoFrameData(videoData: videoFrame)
-                    }
+                    previewView.renderVideoPixelBuffer(pixelBuffer: pixelBuffer, width: width, height: height)
                 }
                 // 群组通话在后台或缩小时不处理预览，直接返回
-                return true
+                return
             }
 
             // 原有逻辑：处理1v1视频通话
             if call.type == .singleVideo,
                let callView = (UIViewController.currentController as? Call1v1VideoViewController)?.callView {
-                if let pixelBuffer = videoFrame.pixelBuffer {
-                    callView.renderVideoPixelBuffer(pixelBuffer: pixelBuffer, width: videoFrame.width, height: videoFrame.height)
-                } else {
-                    callView.renderFromVideoFrameData(videoData: videoFrame)
-                }
+                callView.renderVideoPixelBuffer(pixelBuffer: pixelBuffer, width: width, height: height)
             }
-        }
+        }, consume: { $0() })
         return true
     }
 
     public func onRenderVideoFrame(_ videoFrame: AgoraOutputVideoFrame, uid: UInt, channelId: String) -> Bool {// This method is called when remote video frame is rendered.
-        DispatchQueue.main.async {
+        guard let pixelBuffer = PixelBufferRenderView.pixelBuffer(from: videoFrame) else { return true }
+        let width = videoFrame.width
+        let height = videoFrame.height
+        remoteVideoFrameMailbox.submit({ [weak self] in
+            guard let self else { return }
             UIApplication.shared.isIdleTimerDisabled = true
-        }
-        if let call = self.callInfo, call.type == .singleVideo {
-            let controller = (UIViewController.currentController as? Call1v1VideoViewController)
-                ?? (self.callVC as? Call1v1VideoViewController)
-            if let floatView = controller?.floatView {
-                // 只在状态需要翻转时派发一次，避免每帧都往主队列投递重复的 UI 更新
-                if floatView.isVideoMuted {
-                    DispatchQueue.main.async {
+            if let call = self.callInfo, call.type == .singleVideo {
+                let controller = (UIViewController.currentController as? Call1v1VideoViewController)
+                    ?? (self.callVC as? Call1v1VideoViewController)
+                if let floatView = controller?.floatView {
+                    if floatView.isVideoMuted {
                         floatView.updateVideoState(false)
                     }
-                }
-                if let pixelBuffer = videoFrame.pixelBuffer {
-                    floatView.renderVideoPixelBuffer(pixelBuffer: pixelBuffer, width: videoFrame.width, height: videoFrame.height)
-                } else {
-                    floatView.renderFromVideoFrameData(videoData: videoFrame)
+                    floatView.renderVideoPixelBuffer(pixelBuffer: pixelBuffer, width: width, height: height)
                 }
             }
-        }
+        }, consume: { $0() })
         return true
     }
 

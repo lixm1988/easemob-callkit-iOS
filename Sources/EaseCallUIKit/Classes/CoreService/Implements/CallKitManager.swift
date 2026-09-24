@@ -120,6 +120,9 @@ public let CallKitVersion = "5.0.0"
     
     /// The throttler for RTC callbacks
     let rtcThrottler = RTCCallbackThrottler()
+
+    @nonobjc let localVideoFrameMailbox = LatestFrameMailbox<() -> Void>()
+    @nonobjc let remoteVideoFrameMailbox = LatestFrameMailbox<() -> Void>()
     
     /// Configuration for CallKitManager
     public private(set) var config: CallKitConfig = CallKitConfig()

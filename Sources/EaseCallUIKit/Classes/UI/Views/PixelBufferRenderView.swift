@@ -144,6 +144,12 @@ public class PixelBufferRenderView: DragFloatView {
     }
 
     func renderFromVideoFrameData(videoData: AgoraOutputVideoFrame) {
+        guard let pixelBuffer = Self.pixelBuffer(from: videoData) else { return }
+        renderVideoPixelBuffer(pixelBuffer: pixelBuffer, width: videoData.width, height: videoData.height)
+    }
+
+    static func pixelBuffer(from videoData: AgoraOutputVideoFrame) -> CVPixelBuffer? {
+        if let pixelBuffer = videoData.pixelBuffer { return pixelBuffer }
         let width = videoData.width
         let height = videoData.height
         let yStride = videoData.yStride
@@ -154,7 +160,7 @@ public class PixelBufferRenderView: DragFloatView {
         let uBuffer = videoData.uBuffer
         let vBuffer = videoData.vBuffer
         
-        autoreleasepool {
+        return autoreleasepool {
             var pixelBuffer: CVPixelBuffer?
             let pixelAttributes: [String: Any] = [kCVPixelBufferIOSurfacePropertiesKey as String: [:]]
             
@@ -167,7 +173,7 @@ public class PixelBufferRenderView: DragFloatView {
             
             guard result == kCVReturnSuccess, let pixelBuffer = pixelBuffer else {
                 print("Unable to create CVPixelBuffer: \(result)")
-                return
+                return nil
             }
             
             CVPixelBufferLockBaseAddress(pixelBuffer, .init(rawValue: 0))
@@ -194,15 +200,20 @@ public class PixelBufferRenderView: DragFloatView {
             
             CVPixelBufferUnlockBaseAddress(pixelBuffer, .init(rawValue: 0))
             
-            self.renderVideoPixelBuffer(pixelBuffer: pixelBuffer, width: width, height: height)
+            return pixelBuffer
         }
     }
     
     func renderVideoPixelBuffer(pixelBuffer: CVPixelBuffer, width: Int32, height: Int32) {
-        DispatchQueue.main.async {
+        let updateLayout = {
             self.videoWidth = width
             self.videoHeight = height
             self.layoutDisplayer()
+        }
+        if Thread.isMainThread {
+            updateLayout()
+        } else {
+            DispatchQueue.main.async(execute: updateLayout)
         }
         
         // 创建 CMVideoFormatDescription
@@ -286,4 +297,3 @@ public class PixelBufferRenderView: DragFloatView {
     }
     
 }
-
