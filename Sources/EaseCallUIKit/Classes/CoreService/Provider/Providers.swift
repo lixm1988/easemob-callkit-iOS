@@ -39,6 +39,7 @@ public protocol CallUserProfileProvider { //去掉user
 }
 
 public struct CallRTCTokenInfo: Sendable {
+    /// Legacy credential UID. String-account joins use the UID assigned by RTC instead.
     public let uid: UInt32
     public let token: String
     public let expiration: Int64
@@ -47,6 +48,10 @@ public struct CallRTCTokenInfo: Sendable {
         self.uid = uid
         self.token = token
         self.expiration = expiration
+    }
+
+    public init(token: String, expiration: Int64) {
+        self.init(uid: 0, token: token, expiration: expiration)
     }
 }
 
@@ -58,8 +63,13 @@ public protocol CallTokenProvider: AnyObject {
     
     /// Asynchronously obtains an app-wide RTC credential.
     /// EaseCallUIKit passes `nil` because the returned token is expected to be valid for all channels.
+    /// Sign the token for the current IM username as the RTC string user account.
     func getRTCToken(withChannel channelName: String?) async throws -> CallRTCTokenInfo
     
-    /// Asynchronously resolves RTC UIDs to IM user IDs.
+    /// Compatibility entry point. EaseCallUIKit now resolves accounts through the RTC engine.
     func getRelations(rtc uids: [UInt32]) async throws -> [UInt32:String]
+}
+
+public extension CallTokenProvider {
+    func getRelations(rtc uids: [UInt32]) async throws -> [UInt32: String] { [:] }
 }

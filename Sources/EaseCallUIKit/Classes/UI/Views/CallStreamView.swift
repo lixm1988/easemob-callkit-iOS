@@ -161,6 +161,7 @@ public class CallStreamView: UIImageView {
     }
     
     func updateItem(_ newItem: CallStreamItem) {
+        let wasWaiting = !self.coverView.isHidden
         self.item = newItem
         let nickname = CallKitManager.shared.usersCache[newItem.userId]?.nickname ?? newItem.userId
         if !nickname.isEmpty {
@@ -186,7 +187,10 @@ public class CallStreamView: UIImageView {
         }
         
         self.coverView.isHidden = !newItem.waiting
-        self.imageCover.alpha = newItem.videoMuted ? 0.5 : 0.0
+        self.imageCover.alpha = newItem.videoMuted && newItem.waiting ? 0.5 : 0.0
+        if wasWaiting != newItem.waiting {
+            consoleLogInfo("Stream waiting mask userId: \(newItem.userId), waiting: \(newItem.waiting), coverHidden: \(self.coverView.isHidden), avatarCoverAlpha: \(self.imageCover.alpha), attached: \(self.superview != nil)", type: .debug)
+        }
         self.bringSubviewToFront(self.userInfoView)
         self.bringSubviewToFront(self.networkStatusView)
         self.networkStatusView.isHidden = newItem.waiting
@@ -293,7 +297,7 @@ public class CallStreamItem: NSObject {
     var uid = UInt32(0)
     let index: Int
     var isExpanded: Bool = false
-    var videoMuted: Bool = true
+    var videoMuted: Bool = false
     var audioMuted: Bool = false
     var waiting: Bool = true
     var networkStatus: CallNetworkStatus = .unknown

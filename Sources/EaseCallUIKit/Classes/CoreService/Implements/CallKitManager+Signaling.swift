@@ -113,17 +113,62 @@ extension CallKitManager: CallSignalingManagerDelegate {
     public func callParticipantsDidInvite(_ callId: String, revision: UInt64, invitedUserIds: [String],
                                    inviterId: String, ext: String?) {
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.callInfo?.callId == callId else { return }
-            if let call = self.callInfo {
-                call.inviteUsers.append(contentsOf: invitedUserIds.filter { !call.inviteUsers.contains($0) })
+            guard let self, let call = self.callInfo, call.callId == callId else { return }
+            let previouslyInvitedUsers = Set(call.inviteUsers)
+            for userId in invitedUserIds where !call.inviteUsers.contains(userId) {
+                call.inviteUsers.append(userId)
             }
-            self.callInfo?.extensionInfo = self.signalingDictionary(ext) ?? self.callInfo?.extensionInfo
+            call.extensionInfo = self.signalingDictionary(ext) ?? call.extensionInfo
+            guard call.type == .groupCall else { return }
+
+            let currentUserId = ChatClient.shared().currentUsername ?? ""
+            var waitingUsers: [String] = []
+            var nextIndex = (self.itemsCache.values.map { $0.index }.max() ?? 0) + 1
+            for userId in invitedUserIds where userId != currentUserId && !waitingUsers.contains(userId) {
+                // A repeated invite notification must not mask an accepted participant.
+                if let item = self.itemsCache[userId], !item.waiting, previouslyInvitedUsers.contains(userId) {
+                    continue
+                }
+                if self.usersCache[userId] == nil {
+                    let profile = CallUserProfile()
+                    profile.id = userId
+                    self.usersCache[userId] = profile
+                }
+                let item: CallStreamItem
+                if let existingItem = self.itemsCache[userId] {
+                    item = existingItem
+                } else {
+                    item = CallStreamItem(userId: userId, index: nextIndex, isExpanded: false)
+                    self.itemsCache[userId] = item
+                    nextIndex += 1
+                }
+                item.waiting = true
+                if let canvas = self.canvasCache[userId] {
+                    canvas.updateItem(item)
+                } else {
+                    self.canvasCache[userId] = CallStreamView(item: item)
+                }
+                waitingUsers.append(userId)
+            }
+            if !waitingUsers.isEmpty {
+                let controller = (UIViewController.currentController as? CallMultiViewController)
+                    ?? (self.callVC as? CallMultiViewController)
+                controller?.callView.updateWithItems()
+                self.callStartTimerStart(callId: callId + " users:" + waitingUsers.joined(separator: ","))
+            }
         }
     }
 
     public func callParticipantsDidChange(_ callId: String, revision: UInt64, participants: [CallSignalingParticipant]) {
+        let participantStates = participants.map { "\($0.userId):\($0.state.rawValue)" }.joined(separator: ",")
+        consoleLogInfo("Participants changed received callId: \(callId), revision: \(revision), states: \(participantStates)", type: .debug)
         DispatchQueue.main.async { [weak self] in
-            guard let self, let call = self.callInfo, call.callId == callId else { return }
+            guard let self else { return }
+            guard let call = self.callInfo, call.callId == callId else {
+                consoleLogInfo("Participants changed ignored callId: \(callId), currentCallId: \(self.callInfo?.callId ?? "nil")", type: .debug)
+                return
+            }
+            consoleLogInfo("Participants changed applying callId: \(callId), type: \(call.type), state: \(call.state)", type: .debug)
             let currentUserId = ChatClient.shared().currentUsername ?? ""
             let participantByUserId = Dictionary(participants.map { ($0.userId, $0) }, uniquingKeysWith: { _, latest in latest })
             let remoteParticipants = participants.filter { $0.userId != currentUserId }
@@ -155,24 +200,43 @@ extension CallKitManager: CallSignalingManagerDelegate {
                 }
             }
 
-            call.inviteUsers = participants
-                .filter { $0.state != .left && $0.state != .rejected && $0.state != .canceled && $0.state != .timeout && $0.state != .hanguped }
-                .map(\.userId)
-            for participant in participants where participant.state == .accepted {
-                if self.itemsCache[participant.userId] == nil {
-                    let item = CallStreamItem(userId: participant.userId, index: self.itemsCache.count + 1, isExpanded: false)
-                    item.waiting = false
-                    self.itemsCache[participant.userId] = item
-                } else {
-                    self.itemsCache[participant.userId]?.waiting = false
+            if call.type == .groupCall {
+                let terminalUsers = Set(participants.filter {
+                    CallParticipantRemovalPolicy.isTerminal($0.state.rawValue)
+                }.map(\.userId))
+                call.inviteUsers.removeAll { terminalUsers.contains($0) }
+                for participant in participants where !CallParticipantRemovalPolicy.isTerminal(participant.state.rawValue) {
+                    if !call.inviteUsers.contains(participant.userId) {
+                        call.inviteUsers.append(participant.userId)
+                    }
                 }
+            } else {
+                call.inviteUsers = participants
+                    .filter { !CallParticipantRemovalPolicy.isTerminal($0.state.rawValue) }
+                    .map(\.userId)
             }
-            (UIViewController.currentController as? CallMultiViewController)?.callView.updateWithItems()
-            let activeUsers = Set(participants.filter {
-                $0.state != .left && $0.state != .rejected && $0.state != .canceled &&
-                $0.state != .timeout && $0.state != .hanguped
-            }.map(\.userId))
-            let removedUsers = self.itemsCache.keys.filter { $0 != ChatClient.shared().currentUsername && !activeUsers.contains($0) }
+            var addedItem = false
+            for participant in participants where participant.state == .accepted {
+                let item: CallStreamItem
+                if let existingItem = self.itemsCache[participant.userId] {
+                    item = existingItem
+                } else {
+                    item = CallStreamItem(userId: participant.userId, index: self.itemsCache.count + 1, isExpanded: false)
+                    self.itemsCache[participant.userId] = item
+                    addedItem = true
+                }
+                item.waiting = false
+                self.canvasCache[participant.userId]?.updateItem(item)
+            }
+            if addedItem {
+                (UIViewController.currentController as? CallMultiViewController)?.callView.updateWithItems()
+            }
+            let reportedStates = participantByUserId.mapValues { $0.state.rawValue }
+            let removedUsers = call.type == .groupCall
+                ? Array(CallParticipantRemovalPolicy.usersToRemove(
+                    cachedUsers: Set(self.itemsCache.keys), currentUser: currentUserId,
+                    reportedStates: reportedStates))
+                : []
             for userId in removedUsers {
                 for listener in self.listeners.allObjects {
                     listener.remoteUserDidLeft?(userId: userId, channelName: call.channelName, type: call.type)
@@ -181,22 +245,65 @@ extension CallKitManager: CallSignalingManagerDelegate {
                 self.canvasCache[userId]?.removeFromSuperview()
                 self.canvasCache.removeValue(forKey: userId)
             }
-            (UIViewController.currentController as? CallMultiViewController)?.callView.updateWithItems(removedUsers)
+            if !removedUsers.isEmpty {
+                (UIViewController.currentController as? CallMultiViewController)?.callView.updateWithItems(removedUsers)
+            }
         }
     }
 
-    private func updateCallStateFromParticipants(call: CallInfo, state: CallState) {
+    func updateCallStateFromParticipants(call: CallInfo, state: CallState) {
+        if call.state == .answering && state != .answering { return }
         guard call.state != state else { return }
-        if state == .answering {
-            self.stopInvitationSignalTimer(callId: call.callId)
-            self.stopConfirmBuildConnectionTimer(callId: call.callId)
-            self.callStartTimerStop(callId: call.callId)
-            if call.state != .answering {
-                (self.callVC as? Call1v1AudioViewController)?.addCallTimer()
-                (self.callVC as? Call1v1VideoViewController)?.addCallTimer()
-            }
-        }
+        let shouldEnterAnswering = CallConnectionTransitionPolicy.shouldEnterAnswering(
+            isAnswering: call.state == .answering,
+            hasAcceptedParticipant: state == .answering
+        )
         call.state = state
+        guard shouldEnterAnswering else { return }
+
+        self.stopInvitationSignalTimer(callId: call.callId)
+        self.stopConfirmBuildConnectionTimer(callId: call.callId)
+        self.stopRingTimer(callId: call.callId)
+        self.callStartTimerStop(callId: call.callId)
+
+        let timerIdentify = "call-\(call.channelName)-answering-timer"
+        GlobalTimerManager.shared.registerListener(self, timerIdentify: timerIdentify)
+
+        func addCallTimer(to controller: UIViewController?) {
+            (controller as? Call1v1AudioViewController)?.addCallTimer()
+            (controller as? Call1v1VideoViewController)?.addCallTimer()
+            (controller as? CallMultiViewController)?.addCallTimer()
+        }
+
+        var visitedControllers = Set<ObjectIdentifier>()
+        func callController(in hierarchy: UIViewController?) -> UIViewController? {
+            guard let controller = hierarchy else { return nil }
+            guard visitedControllers.insert(ObjectIdentifier(controller)).inserted else { return nil }
+            if controller is Call1v1AudioViewController || controller is Call1v1VideoViewController || controller is CallMultiViewController {
+                return controller
+            }
+            if let navigationController = controller as? UINavigationController {
+                for childController in navigationController.viewControllers.reversed() {
+                    if let callController = callController(in: childController) {
+                        return callController
+                    }
+                }
+            }
+            if let tabController = controller as? UITabBarController,
+               let callController = callController(in: tabController.selectedViewController) {
+                return callController
+            }
+            if let callController = callController(in: controller.parent) {
+                return callController
+            }
+            return callController(in: controller.presentingViewController)
+        }
+
+        let visibleCallController = callController(in: UIViewController.currentController)
+        addCallTimer(to: visibleCallController)
+        if let callVC = self.callVC, callVC !== visibleCallController {
+            addCallTimer(to: callVC)
+        }
     }
 
     private func endReasonForParticipant(_ state: Int, local: Bool) -> CallEndReason {
@@ -1050,7 +1157,7 @@ extension CallKitManager: CallMessageService {
             return
         }
         let request = CallCreateRequest(kind: signalingCallKind(type), mediaType: signalingMediaType(type), targetUserIds: [userId])
-        request.timeoutSeconds = 10
+        request.timeoutSeconds = UInt(config.ringTimeOut)
         request.conversationId = nil
         request.pushTitle = extensionInfo?["pushTitle"] as? String
         request.pushContent = extensionInfo?["pushContent"] as? String
@@ -1275,7 +1382,7 @@ extension CallKitManager: CallMessageService {
     ) {
         guard let manager = signalingManager else {
             handleBusinessError(CallError.CallBusiness(error: .signaling, message: "Call signaling manager is unavailable"))
-            cleanupFailedSignaling(callId: callId)
+            if !isAlreadyInCall { cleanupFailedSignaling(callId: callId) }
             return
         }
         let targets = ids.filter { $0 != ChatClient.shared().currentUsername }
@@ -1283,7 +1390,7 @@ extension CallKitManager: CallMessageService {
             guard let self else { return }
             if let error {
                 self.notifySignalingError(error)
-                self.cleanupFailedSignaling(callId: callId)
+                if !isAlreadyInCall { self.cleanupFailedSignaling(callId: callId) }
                 return
             }
             if let actualCallId = result?.snapshot?.callId, actualCallId != callId {
@@ -1303,12 +1410,12 @@ extension CallKitManager: CallMessageService {
             }
         }
         if isAlreadyInCall {
-            manager.inviteParticipants(callId, userIds: targets, timeoutSeconds: 60,
+            manager.inviteParticipants(callId, userIds: targets, timeoutSeconds: UInt(config.ringTimeOut),
                                        ext: signalingJSON(extensionInfo), pushTitile: nil, pushContent: nil,
                                        completion: completion)
         } else {
             let request = CallCreateRequest(kind: .conference, mediaType: .video, targetUserIds: targets)
-            request.timeoutSeconds = 60
+            request.timeoutSeconds = UInt(config.ringTimeOut)
             request.conversationId = groupId
             request.pushTitle = extensionInfo?["pushTitle"] as? String
             request.pushContent = extensionInfo?["pushContent"] as? String
@@ -1630,8 +1737,14 @@ extension CallKitManager: CallMessageService {
             handleBusinessError(CallError.CallBusiness(error: .signaling, message: "Call signaling manager is unavailable"))
             return
         }
+        consoleLogInfo("Sending leaveCall for callId: \(callId)", type: .info)
         manager.leaveCall(callId) { [weak self] _, error in
-            if let error { self?.notifySignalingError(error) }
+            if let error {
+                consoleLogInfo("leaveCall failed for callId: \(callId), error: \(String(describing: error.errorDescription))", type: .error)
+                self?.notifySignalingError(error)
+            } else {
+                consoleLogInfo("leaveCall succeeded for callId: \(callId)", type: .info)
+            }
         }
         return
     }
@@ -1774,16 +1887,32 @@ extension CallKitManager: CallMessageService {
         let completion: CallCompletion = { [weak self] _, error in
             guard let self else { return }
             if let error { self.notifySignalingError(error); return }
-            if result == kAcceptResult, let call = self.callInfo, call.callId == callId {
-                self.startConfirmBuildConnectionTimer(callId: callId)
-                self.joinChannel(channelName: call.channelName) { [weak self] success in
-                    guard let self else { return }
-                    if success {
-                        self.callInfo?.state = .answering
-                        self.presentCalleeController(call: call)
-                    } else {
-                        self.hangup()
+            if result == kAcceptResult {
+                let joinAcceptedCall = { [weak self] in
+                    guard let self, let call = self.callInfo, call.callId == callId else { return }
+                    if call.state != .answering {
+                        self.startConfirmBuildConnectionTimer(callId: callId)
                     }
+                    self.joinChannel(channelName: call.channelName) { [weak self] success in
+                        guard let self else { return }
+                        guard let currentCall = self.callInfo,
+                              currentCall === call,
+                              currentCall.callId == callId,
+                              currentCall.state != .idle else { return }
+                        if success {
+                            self.stopConfirmBuildConnectionTimer(callId: callId)
+                            self.updateCallStateFromParticipants(call: currentCall, state: .answering)
+                            self.presentCalleeController(call: currentCall)
+                        } else {
+                            self.terminateCall()
+                            self.updateCallEndReason(.abnormalEnd)
+                        }
+                    }
+                }
+                if Thread.isMainThread {
+                    joinAcceptedCall()
+                } else {
+                    DispatchQueue.main.async(execute: joinAcceptedCall)
                 }
             }
         }
@@ -1834,6 +1963,7 @@ extension CallKitManager: CallMessageService {
     public func hangup() {
         consoleLogInfo("Hangup called", type: .info)
         if let call = self.callInfo {
+            consoleLogInfo("Hangup callId: \(call.callId), type: \(call.type), state: \(call.state)", type: .info)
             switch call.state {
             case .answering:
                 self.terminateCall()
@@ -1842,26 +1972,8 @@ extension CallKitManager: CallMessageService {
                 GlobalTimerManager.shared.invalidate()
             case .dialing:
                 if call.type == .groupCall {
-                    let inviteGroupUserTimerKeys = GlobalTimerManager.shared.timerCache.keys.filter { $0.components(separatedBy: " users:").count > 0 }
-                    for key in inviteGroupUserTimerKeys {
-                        let keyComponents = key.components(separatedBy: " users:")
-                        let callId = keyComponents.first ?? ""
-                        
-                        if callId.hasSuffix(call.callId) {
-                            let trails = keyComponents.last?.components(separatedBy: "-") ?? []
-                            let users = trails.first?.components(separatedBy: ",") ?? []
-                            var calleeId = ""
-                            let callees = users.joined(separator: ",")
-                            if users.count > 1 {
-                                calleeId = callees
-                            } else {
-                                calleeId = users.first ?? ""
-                            }
-                            self.cancelCall(callId: call.callId, calleeId:calleeId)
-                        } else {
-                            consoleLogInfo("Group Call Caller Cancel ID mismatch: \(call.callId) != \(callId)", type: .error)
-                        }
-                    }
+                    // Leaving a conference must not depend on pending invitation timers.
+                    self.terminateCall()
                 } else {
                     self.cancelCall(callId: call.callId, calleeId:call.calleeId)
                     call.state = .idle
@@ -1953,15 +2065,6 @@ extension CallKitManager: CallMessageService {
             guard let self = self else { return }
             do {
                 let credential = try await self.credentialForUse(reason: .join)
-                guard self.config.disableRTCTokenValidation || self.tokenProvider == nil || credential.uid > 0 else {
-                    let message = "CallTokenProvider returned RTC UID 0; joining the RTC channel is not allowed."
-                    consoleLogInfo(message, type: .error)
-                    self.handleBusinessError(CallError.CallBusiness(error: .param, message: message))
-                    DispatchQueue.main.async {
-                        completion(false)
-                    }
-                    return
-                }
                 if self.hadJoinedChannel {
                     let leaveResult = self.engine?.leaveChannel()
                     if leaveResult != 0 {
@@ -1974,12 +2077,6 @@ extension CallKitManager: CallMessageService {
                 }
                 self.joinWithToken(credential: credential, channelName: channelName, completion: completion)
             } catch {
-                if self.tokenProvider != nil,
-                   let failure = error as? RTCCredentialFailure,
-                   case .invalidUID = failure {
-                    let message = "CallTokenProvider returned RTC UID 0; joining the RTC channel is not allowed."
-                    self.handleBusinessError(CallError.CallBusiness(error: .param, message: message))
-                }
                 consoleLogInfo("Failed to prepare RTC credential for channel \(channelName): \(error.localizedDescription)", type: .error)
                 DispatchQueue.main.async {
                     completion(false)
@@ -2003,23 +2100,24 @@ extension CallKitManager: CallMessageService {
         config.publishMicrophoneTrack = true
         config.clientRoleType = .broadcaster
         config.channelProfile = .liveBroadcasting
-        let currentUser = ChatClient.shared().currentUsername ?? ""
-        let uid = credential.uid
-        self.syncLocalRTCUID(uid)
-        consoleLogInfo("\(currentUser) joining channel: \(channelName) with uid: \(uid) self.config.disableRTCTokenValidation:\(self.config.disableRTCTokenValidation)", type: .debug)
+        guard let currentUser = ChatClient.shared().currentUsername, !currentUser.isEmpty,
+              currentUser == credential.userID else {
+            DispatchQueue.main.async { completion(false) }
+            return
+        }
+        consoleLogInfo("\(currentUser) joining channel: \(channelName) with userAccount: \(currentUser)", type: .debug)
         let joinToken = self.config.disableRTCTokenValidation || credential.token.isEmpty ? nil : credential.token
         consoleLogInfo("joinToken is nil:\(joinToken == nil)", type: .debug)
-        let result = engine.joinChannel(byToken: joinToken, channelId: channelName, uid: UInt(uid), mediaOptions: config, joinSuccess: { [weak self] channel, joinedUid, elapsed in
+        let result = engine.joinChannel(byToken: joinToken, channelId: channelName, userAccount: currentUser, mediaOptions: config, joinSuccess: { [weak self] channel, joinedUid, elapsed in
             guard let `self` = self else { return  }
             consoleLogInfo("\(currentUser) joined channel: \(channel) with uid: \(joinedUid) elapsed: \(elapsed): account \(ChatClient.shared().currentUsername ?? "")", type: .debug)
-            // 与本次入会所用凭证的 uid 比对。currentUserRTCUID 是从凭证缓存实时计算的动态值，
-            // 入会期间若发生凭证刷新会导致比对失败，进而使 hadJoinedChannel 永不置 true。
-            if joinedUid == UInt(credential.uid) {
-                self.hadJoinedChannel = true
-                DispatchQueue.global().asyncAfter(deadline: .now() + 2.4, execute: {
-                    self.updateCallEndReason(.abnormalEnd,false)
-                })
-            }
+            guard ChatClient.shared().currentUsername == currentUser,
+                  self.callInfo?.channelName == channel else { return }
+            self.syncLocalRTCUID(UInt32(joinedUid))
+            self.hadJoinedChannel = true
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2.4, execute: {
+                self.updateCallEndReason(.abnormalEnd, false)
+            })
             if let call = self.callInfo {
                 if call.type == .singleVideo || call.type == .groupCall {
                     self.checkCameraPermission()
@@ -2040,9 +2138,7 @@ extension CallKitManager: CallMessageService {
                 }
                 return
             }
-            self.quitCall()
             consoleLogInfo("\(currentUser) failed to join channel: \(channelName) error code: \(result)", type: .error)
-            GlobalTimerManager.shared.invalidate()
             if let code = AgoraErrorCode(rawValue: Int(abs(result))) {
                 self.notifyCallError(CallError(CallError.RTC(code: code, message: "RTC error occurred with code: \(result)"), module: .rtc))
             }
@@ -2090,6 +2186,7 @@ extension CallKitManager: CallMessageService {
     func quitCall() {
         if self.callInfo != nil {
             self.hadJoinedChannel = false
+            $rtcLocalUID.modify { $0 = 0 }
             DispatchQueue.main.async {
                 AudioPlayerManager.shared.playAudio(from: "busy")
                 self.callVC?.dismiss(animated: false)
@@ -2262,32 +2359,17 @@ extension CallKitManager: TimerServiceListener {
             
         default:
             if timerIdentify.contains(" users:") {//群组中发起通话邀请成员超时
-                if seconds >= CallKitManager.shared.config.ringTimeOut {
-                    if call.type == .groupCall {
-                        if let currentVC = UIViewController.currentController as? CallMultiViewController {
-                            let inviteGroupUserTimerKeys = GlobalTimerManager.shared.timerCache.keys.filter { $0.components(separatedBy: " users:").count > 0 }
-                            var removeUsers: [String] = []
-                            for key in inviteGroupUserTimerKeys {
-                                if timerIdentify == key,seconds >= CallKitManager.shared.config.ringTimeOut {
-                                    let keyComponents = key.components(separatedBy: " users:")
-                                    let trails = keyComponents.last?.components(separatedBy: "-") ?? []
-                                    let users = trails.first?.components(separatedBy: ",") ?? []
-                                    for userId in users {
-                                        if let item = self.itemsCache[userId],item.waiting {
-                                            removeUsers.append(userId)
-                                            self.itemsCache.removeValue(forKey: userId)
-                                            self.canvasCache.removeValue(forKey: userId)
-                                            self.cancelCall(callId: call.callId, calleeId: userId)
-                                        }
-                                    }
-                                }
-                            }
-                            if !removeUsers.isEmpty {
-                                currentVC.callView.updateWithItems(removeUsers)
-                            }
-                            GlobalTimerManager.shared.removeTimeAsSimilarKey(timerIdentify)
-                        }
+                if seconds >= self.config.ringTimeOut, call.type == .groupCall {
+                    let waitingUsers = Set(self.itemsCache.compactMap { $0.value.waiting ? $0.key : nil })
+                    let users = GroupInviteTimeoutPolicy.usersToUnmask(
+                        timerIdentifier: timerIdentify, callID: call.callId, waitingUsers: waitingUsers)
+                    consoleLogInfo("Group invite timer expired callId: \(call.callId), timer: \(timerIdentify), usersToUnmask: \(users)", type: .debug)
+                    for userId in users {
+                        guard let item = self.itemsCache[userId] else { continue }
+                        item.waiting = false
+                        self.canvasCache[userId]?.updateItem(item)
                     }
+                    GlobalTimerManager.shared.removeTimeAsSimilarKey(timerIdentify)
                 }
             }
             

@@ -5,11 +5,9 @@ enum RTCCredentialFailure: LocalizedError {
     case imNotConnected
     case missingIdentity
     case invalidAppID
-    case invalidUID
     case invalidCredential
     case staleRequest
     case expired
-    case uidChanged
     case tokenNotRenewed
 
     var errorDescription: String? {
@@ -17,11 +15,9 @@ enum RTCCredentialFailure: LocalizedError {
         case .imNotConnected: return "The IM SDK is not connected."
         case .missingIdentity: return "RTC credential identity is unavailable."
         case .invalidAppID: return "RTC App ID is invalid."
-        case .invalidUID: return "RTC credential source returned UID 0."
         case .invalidCredential: return "RTC credential source returned an invalid credential."
         case .staleRequest: return "RTC credential request no longer matches the active call."
         case .expired: return "RTC credential has expired."
-        case .uidChanged: return "RTC provider returned a different UID while renewing."
         case .tokenNotRenewed: return "RTC provider returned the expired token again."
         }
     }
@@ -48,12 +44,6 @@ struct RTCCredentialRequestState {
     let task: Task<RTCCredentialRecord, Error>
 }
 
-/// 单个 RTC UID 的解析结果。把错误随结果一起返回，避免用共享状态在并发 Task 之间传错误。
-struct RTCRelationResolution {
-    let userID: String?
-    let error: ChatError?
-}
-
 extension CallKitManager {
     @discardableResult
     func hydrateRTCCachesIfNeeded() -> Bool {
@@ -75,6 +65,7 @@ extension CallKitManager {
             return true
         }
         if appChanged {
+            $rtcLocalUID.modify { $0 = 0 }
             $rtcCredentialCache.modify { $0 = nil }
             $rtcCredentialRequest.modify { state in
                 state?.task.cancel()
@@ -84,23 +75,6 @@ extension CallKitManager {
                 task?.cancel()
                 task = nil
             }
-            $rtcUserIdCache.modify { $0.removeAll() }
-            $rtcRelationRequests.modify { requests in
-                requests.values.forEach { $0.cancel() }
-                requests.removeAll()
-            }
-            $rtcRelationFailures.modify { $0.removeAll() }
-            _ = $loadedRelationAppIDs.modify { $0.remove(resolvedAppID) }
-        }
-
-        let shouldLoadRelations = $loadedRelationAppIDs.modify { loaded -> Bool in
-            guard !loaded.contains(resolvedAppID) else { return false }
-            loaded.insert(resolvedAppID)
-            return true
-        }
-        if shouldLoadRelations {
-            let relations = rtcPersistenceStore.loadRelations(appID: resolvedAppID)
-            $rtcUserIdCache.modify { $0.merge(relations) { _, new in new } }
         }
 
         guard let userID = ChatClient.shared().currentUsername, !userID.isEmpty else { return true }
@@ -112,6 +86,7 @@ extension CallKitManager {
             return true
         }
         if identityChanged {
+            $rtcLocalUID.modify { $0 = 0 }
             _ = $loadedCredentialKeys.modify { $0.remove(key) }
             $rtcCredentialRequest.modify { state in
                 state?.task.cancel()
@@ -162,9 +137,6 @@ extension CallKitManager {
             if let cached = $rtcCredentialCache.withValue({ $0 }),
                cached.appID == resolvedAppID,
                cached.userID == currentUserID {
-                if cached.uid == 0 {
-                    return try await credentialFromIMSDK(failedCredential: nil)
-                }
                 if cached.token.isEmpty && !config.disableRTCTokenValidation {
                     return try await credentialFromIMSDK(failedCredential: cached)
                 }
@@ -184,9 +156,6 @@ extension CallKitManager {
         let now = Int64(Date().timeIntervalSince1970)
         if let cached = $rtcCredentialCache.withValue({ $0 }), cached.appID == appID,
            cached.userID == ChatClient.shared().currentUsername {
-            if cached.uid == 0 {
-                return try await requestRTCCredential(failedCredential: nil)
-            }
             if cached.token.isEmpty {
                 if config.disableRTCTokenValidation { return cached }
                 return try await requestRTCCredential(failedCredential: cached)
@@ -262,7 +231,6 @@ extension CallKitManager {
             guard let self = self else { throw CancellationError() }
             let info = try await self.fetchRTCCredential()
             try Task.checkCancellation()
-            guard info.uid > 0 else { throw RTCCredentialFailure.invalidUID }
             guard info.expiration >= 0 else { throw RTCCredentialFailure.invalidCredential }
             guard self.config.disableRTCTokenValidation || !info.token.isEmpty else {
                 throw RTCCredentialFailure.invalidCredential
@@ -276,7 +244,6 @@ extension CallKitManager {
                 throw RTCCredentialFailure.staleRequest
             }
             if let failed = failedCredential {
-                guard failed.uid == info.uid else { throw RTCCredentialFailure.uidChanged }
                 if failed.token == info.token { throw RTCCredentialFailure.tokenNotRenewed }
             }
             let record = RTCCredentialRecord(appID: requestAppID, userID: requestUserID, uid: info.uid, token: info.token, expiration: info.expiration, generation: generation)
@@ -361,7 +328,6 @@ extension CallKitManager {
                     }
                 }
                 try Task.checkCancellation()
-                guard info.uid > 0 else { throw RTCCredentialFailure.invalidUID }
                 guard info.expiration >= 0 else { throw RTCCredentialFailure.invalidCredential }
                 guard self.config.disableRTCTokenValidation || !info.token.isEmpty else {
                     throw RTCCredentialFailure.invalidCredential
@@ -376,7 +342,6 @@ extension CallKitManager {
                     throw RTCCredentialFailure.staleRequest
                 }
                 if let failed = failedCredential {
-                    guard failed.uid == info.uid else { throw RTCCredentialFailure.uidChanged }
                     if !failed.token.isEmpty, failed.token == info.token {
                         throw RTCCredentialFailure.tokenNotRenewed
                     }
@@ -431,84 +396,4 @@ extension CallKitManager {
         $rtcRefreshTask.modify { $0 = task }
     }
 
-    func resolveRTCUserIDs(_ uids: [UInt]) async -> (relations: [UInt: String], error: ChatError?) {
-        guard hydrateRTCCachesIfNeeded() else { return ([:], nil) }
-        let uniqueUIDs = Set(uids)
-        var result = $rtcUserIdCache.withValue { cache in
-            Dictionary(uniqueKeysWithValues: uniqueUIDs.compactMap { uid in cache[uid].map { (uid, $0) } })
-        }
-        // 排除近期解析失败过的 uid，避免高频回调下的请求风暴
-        let now = Date()
-        let suppressed = $rtcRelationFailures.modify { failures -> Set<UInt> in
-            failures = failures.filter { now.timeIntervalSince($0.value) < CallKitManager.rtcRelationFailureTTL }
-            return Set(failures.keys)
-        }
-        let missing = uniqueUIDs.filter { $0 > 0 && result[$0] == nil && !suppressed.contains($0) }
-        var lastError: ChatError?
-        for uid in missing {
-            let relationAppID = appID
-            let task = $rtcRelationRequests.modify { requests -> Task<RTCRelationResolution, Never> in
-                if let existing = requests[uid] { return existing }
-                let created = Task<RTCRelationResolution, Never> { [weak self] in
-                    guard let self = self else { return RTCRelationResolution(userID: nil, error: nil) }
-                    let fetched = await self.fetchRTCRelations([UInt32(uid)])
-                    guard !Task.isCancelled, self.appID == relationAppID else {
-                        return RTCRelationResolution(userID: nil, error: nil)
-                    }
-                    guard let userID = fetched.relations[UInt32(uid)], !userID.isEmpty else {
-                        return RTCRelationResolution(userID: nil, error: fetched.error)
-                    }
-                    self.$rtcUserIdCache.modify { $0[uid] = userID }
-                    if self.tokenProvider != nil {
-                        self.rtcPersistenceStore.scheduleMergeRelations([uid: userID], appID: relationAppID)
-                    }
-                    return RTCRelationResolution(userID: userID, error: nil)
-                }
-                requests[uid] = created
-                return created
-            }
-            let resolution = await task.value
-            _ = $rtcRelationRequests.modify { $0.removeValue(forKey: uid) }
-            if let userID = resolution.userID {
-                result[uid] = userID
-                _ = $rtcRelationFailures.modify { $0.removeValue(forKey: uid) }
-            } else {
-                // 记录失败时间戳，TTL 内不再重试该 uid
-                $rtcRelationFailures.modify { $0[uid] = Date() }
-                if let error = resolution.error { lastError = error }
-            }
-        }
-        return (result, lastError)
-    }
-
-    func resolveRTCUserIDs(_ uids: [NSNumber], completion: @escaping ([NSNumber: String]?, ChatError?) -> Void) {
-        Task {
-            let outcome = await resolveRTCUserIDs(uids.map { $0.uintValue })
-            let bridged = Dictionary(uniqueKeysWithValues: outcome.relations.map { (NSNumber(value: $0.key), $0.value) })
-            DispatchQueue.main.async {
-                completion(bridged, outcome.error)
-            }
-        }
-    }
-
-    private func fetchRTCRelations(_ uids: [UInt32]) async -> (relations: [UInt32: String], error: ChatError?) {
-        if let provider = tokenProvider {
-            do {
-                let values = try await provider.getRelations(rtc: uids)
-                return (values.filter { $0.key > 0 && !$0.value.isEmpty }, nil)
-            } catch {
-                consoleLogInfo("CallTokenProvider failed to resolve RTC UIDs: \(error.localizedDescription)", type: .error)
-                return ([:], ChatError(description: error.localizedDescription, code: .general))
-            }
-        }
-        return await withCheckedContinuation { continuation in
-            ChatClient.shared().getUserId(byRTCUIds: uids.map { NSNumber(value: $0) }) { relations, error in
-                let mapped = Dictionary(uniqueKeysWithValues: (relations ?? [:]).compactMap { key, value in
-                    let uid = key.uint32Value
-                    return uid > 0 && !value.isEmpty ? (uid, value) : nil
-                })
-                continuation.resume(returning: (mapped, error))
-            }
-        }
-    }
 }

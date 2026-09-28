@@ -26,11 +26,12 @@ open class CallMultiViewController: UIViewController {
     }()
     
     @objc func createNavigationBar() -> CallNavigationBar {
-        CallNavigationBar(showLeftItem: true,textAlignment: .left, rightImages: [UIImage(callNamed: "person_add")!]).backgroundColor(.clear)
+        CallNavigationBar(show: CGRect(x: 0, y: 0, width: ScreenWidth, height: 56), showLeftItem: true, textAlignment: .left, rightImages: [UIImage(callNamed: "person_add")!], nearStatusBar: false).backgroundColor(.clear)
     }
     
     public lazy var callView: MultiPersonCallView = {
-        MultiPersonCallView(frame: CGRect(x: 0, y: NavigationHeight+23, width: ScreenWidth, height:self.connected ? ScreenHeight-NavigationHeight-self.bottomView.frame.height-23-29:ScreenHeight-NavigationHeight-54-96-20-23)).backgroundColor(.clear)
+        let top = self.navigationBar.frame.maxY + 23
+        return MultiPersonCallView(frame: CGRect(x: 0, y: top, width: ScreenWidth, height: max(0, self.bottomView.frame.minY - top - 29))).backgroundColor(.clear)
     }()
     
     public lazy var bottomView: MultiCallBottomView = {
@@ -38,7 +39,7 @@ open class CallMultiViewController: UIViewController {
         
         bottomBar.animationToExpand = { [weak self] in
             guard let `self` = self else { return }
-            self.callView.frame = CGRect(x: 0, y: NavigationHeight+23, width: ScreenWidth, height: ScreenHeight-NavigationHeight-bottomBar.frame.height - 23 - 29)
+            self.updateCallViewFrame()
         }
         return bottomBar
     }()
@@ -83,13 +84,36 @@ open class CallMultiViewController: UIViewController {
     open override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
     }
+
+    open override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        let insets = self.view.safeAreaInsets
+        self.navigationBar.frame = CGRect(x: insets.left, y: insets.top, width: max(0, self.view.bounds.width - insets.left - insets.right), height: 56)
+        var rightFrame = self.navigationBar.rightItems.frame
+        rightFrame.origin.x = self.navigationBar.bounds.width - rightFrame.width - 8
+        rightFrame.origin.y = self.navigationBar.avatar.frame.midY - rightFrame.height / 2
+        self.navigationBar.rightItems.frame = rightFrame
+        var titleFrame = self.navigationBar.titleLabel.frame
+        titleFrame.size.width = max(0, rightFrame.minX - titleFrame.minX - 8)
+        self.navigationBar.titleLabel.frame = titleFrame
+        self.navigationBar.titleOriginFrame = titleFrame
+        self.navigationBar.detail.frame.size.width = titleFrame.width
+        self.updateCallViewFrame()
+    }
+
+    private func updateCallViewFrame() {
+        let top = self.navigationBar.frame.maxY + 23
+        self.callView.frame = CGRect(x: 0, y: top, width: self.view.bounds.width, height: max(0, self.bottomView.frame.minY - top - 29))
+    }
     
     open override func viewDidLoad() {
         super.viewDidLoad()
         let state = self.connected
         self.view.addSubViews([self.background, self.navigationBar,self.bottomView,self.callView])
         if state {
-            self.addCallTimer()
+            if CallKitManager.shared.callInfo?.state == .answering {
+                self.addCallTimer()
+            }
             self.bottomView.isCallConnected = true
         } else {
             self.bottomView.isCallConnected = false
@@ -136,14 +160,13 @@ open class CallMultiViewController: UIViewController {
             self.callView.isHidden = !self.connected
             self.bottomView.animateToExpandedState()
             self.bottomView.isCallConnected = true
-            self.callView.frame = CGRect(x: 0, y: NavigationHeight+23, width: ScreenWidth, height: ScreenHeight-NavigationHeight-self.bottomView.frame.height-23-29)
+            self.updateCallViewFrame()
         }
     }
     
     private func setupNavigationState() {
         if self.role != .callee {
             self.navigationBar.subtitle = "calling".call.localize
-            self.addCallTimer()
         } else {
             if let call = CallKitManager.shared.callInfo {
                 switch call.state {
@@ -154,7 +177,6 @@ open class CallMultiViewController: UIViewController {
                     }
                 case .answering:
                     self.navigationBar.subtitle = "Connecting".call.localize
-                    self.addCallTimer()
                 default:
                     break
                 }
@@ -248,10 +270,6 @@ open class CallMultiViewController: UIViewController {
             self.removeLocalPreview()
             self.isCameraPreviewEnabled = false
 
-            if let call = CallKitManager.shared.callInfo {
-                GlobalTimerManager.shared.registerListener(self, timerIdentify: "call-\(call.channelName)-answering-timer")
-                GlobalTimerManager.shared.registerListener(CallKitManager.shared, timerIdentify: "call-\(call.channelName)-answering-timer")
-            }
             if #available(iOS 17.4, *),CallKitManager.shared.config.enableVOIP {
                 if LiveCommunicationManager.shared.manager != nil {
                     CallKitManager.shared.updateLiveCommunicationStateIfNeeded()

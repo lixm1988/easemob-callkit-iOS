@@ -35,7 +35,7 @@
   - [3.监听事件和错误](#3监听easecalluikit事件和错误)   
   - [4.创建呼叫页面并调用呼叫Api](#4创建呼叫页面并调用呼叫api) 
   - [5.进阶用法](#5进阶用法)
-    - [5.4 CallTokenProvider（自己提供 RTC AppId / Token / uid 映射）](#54-calltokenprovider自己提供-rtc-appid--token--uid-映射)
+    - [5.4 CallTokenProvider（自己提供 RTC AppId / Token）](#54-calltokenprovider自己提供-rtc-appid--token)
 - [常见问题](#常见问题)
 - [自定义](#自定义)
   - [1.修改UI可配置项](#1修改ui可配置项)
@@ -170,7 +170,7 @@ let token: String = <#token#>
 
 注意： 如果想要自定义的头像昵称显示信息，在ViewController.swift中找到loginAction方法后填入您要显示的当前用户id对应的昵称头像`profile.nickname` `profile.avatarURL`信息即可
 
-如果要体验自己签发 RTC Token 的新用法，首页点击 **Token Provider** 进入示例页。先在 `PublicDefines.swift` 填写 `agoraAppId`，生产环境再用自己的服务端下发 Token 和 uid↔userId 映射。详见 [5.4 CallTokenProvider](#54-calltokenprovider自己提供-rtc-appid--token--uid-映射)。
+如果要体验自己签发 RTC Token 的新用法，首页点击 **Token Provider** 进入示例页。先在 `PublicDefines.swift` 填写 `agoraAppId`，生产环境再用自己的服务端按当前 IM 字符串账号签发 RTC Token。详见 [5.4 CallTokenProvider](#54-calltokenprovider自己提供-rtc-appid--token)。
 注意：
    在生产环境中，为了安全考虑，你需要在你的应用服务器集成 获取 App Token API 和 获取用户 Token API 实现获取 Token 的业务逻辑，使你的用户从你的应用服务器获取 Token。
 
@@ -1171,11 +1171,11 @@ extension ViewController: CallUserProfileProvider {
 
 详见[PictureInPicture.md](./PictureInPicture.md)
 
-### 5.4 CallTokenProvider（自己提供 RTC AppId / Token / uid 映射）
+### 5.4 CallTokenProvider（自己提供 RTC AppId / Token）
 
-首页 Example 是旧用法：`CallKitManager.shared.setup(config)`，登录 IM 后由 IM SDK 下发 RTC AppId、Token、uid 以及 uid↔userId 映射。
+首页 Example 是旧用法：`CallKitManager.shared.setup(config)`，登录 IM 后由 IM SDK 下发 RTC AppId 和 Token。RTC 以当前 IM `currentUsername` 作为字符串账号加入频道。
 
-新用法适合你已经有自己的声网 App ID，并且要在自己的应用服务器上签发 RTC Token、维护 IM userId 与 RTC uid 映射的场景。Example 首页点 **Token Provider** 可进入完整可运行示例，源码见 `Example/EaseCallUIKit/TokenProviderViewController.swift`。
+新用法适合你已经有自己的声网 App ID，并且要在自己的应用服务器上按当前 IM 字符串账号签发 RTC Token 的场景。Example 首页点 **Token Provider** 可进入完整可运行示例，源码见 `Example/EaseCallUIKit/TokenProviderViewController.swift`。
 
 两种路径只能选一种。RTC 引擎创建后不能再切换凭证来源。如果先在首页登录，再进 Token Provider 页，需要重启 App 后先进入该页。
 
@@ -1186,8 +1186,8 @@ extension ViewController: CallUserProfileProvider {
 | IM SDK | 用自己的 AppKey 初始化 | 同样用自己的 AppKey 初始化 |
 | CallKit 初始化 | `setup(config)` | `setup(config, tokenProvider:)` |
 | RTC App ID | 登录后从 IM SDK `options.appId` 读取 | `CallTokenProvider.getAppId()` |
-| RTC Token / uid | 登录后向 IM SDK 要 | `CallTokenProvider.getRTCToken(withChannel:)` |
-| uid → IM userId | 向 IM SDK 要 | `CallTokenProvider.getRelations(rtc:)` |
+| RTC Token | 登录后向 IM SDK 要 | `CallTokenProvider.getRTCToken(withChannel:)` |
+| UID → 账号 | `RTC Engine.getUserInfo(byUid:withError:)` | 同左，无需业务映射 |
 
 #### 第一步：用自己的 AppKey 初始化 IM SDK
 
@@ -1228,14 +1228,14 @@ CallKit 会在这些时机回调，你只需要向自己的服务端拿数据并
 
 - `getAppId()`：创建 RTC 引擎时读取，必须是稳定的声网 App ID，不要返回环信 IM AppKey。
 - `getRTCToken(withChannel:)`：登录后、进房前、Token 即将过期、回到前台时读取。当前 `channelName` 固定传 `nil`，请签发对所有频道有效的应用级 Token。
-- `getRelations(rtc:)`：远端用户进房后，把 RTC uid 解析成 IM userId，用来显示头像昵称。
+- UID 对应的 IM 账号由 RTC Engine 查询，SDK 不再请求或缓存业务服务器的 UID 映射。`getRelations(rtc:)` 保留兼容默认实现，运行时不再调用。
 
 返回值约束：
 
-- uid 必须大于 0，同一用户应尽量保持稳定。
+- Token 必须按当前 IM `currentUsername` 字符串账号签发；数值 UID 由 RTC 分配。`CallRTCTokenInfo.uid` 保留兼容，加入频道时不使用，允许为 0。所有参会端须使用字符串账号加入频道。
 - `expiration` 为 Unix 秒；传 `0` 表示不过期。有效 Token 会在过期前约 5 分钟自动续期。
 - 除非把 `CallKitConfig.disableRTCTokenValidation` 设为 `true`，否则 token 不能为空。
-- 登出 IM 时请调用 `CallKitManager.shared.cleanUserDefaults()`，清理本机缓存的 Token 和 uid 映射。
+- 登出 IM 时请调用 `CallKitManager.shared.cleanUserDefaults()`，清理本机缓存的 Token。
 
 <details>
 <summary>点击展开/收起 CallTokenProvider 示例</summary>
@@ -1249,7 +1249,7 @@ final class ExampleCallTokenProvider: CallTokenProvider {
 
     func getRTCToken(withChannel channelName: String?) async throws -> CallRTCTokenInfo {
         // channelName 当前为 nil，服务端应按应用级 Token 签发。
-        // 建议服务端返回：{ "uid": 123456, "token": "007eJx...", "expiration": 1710000000 }
+        // 建议服务端返回：{ "token": "007eJx...", "expiration": 1710000000 }
         let currentUserId = ChatClient.shared().currentUsername ?? ""
         var request = URLRequest(url: URL(string: "https://your-server.com/rtc/token")!)
         request.httpMethod = "POST"
@@ -1261,27 +1261,12 @@ final class ExampleCallTokenProvider: CallTokenProvider {
         let (data, _) = try await URLSession.shared.data(for: request)
         let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         return CallRTCTokenInfo(
-            uid: (object?["uid"] as? NSNumber)?.uint32Value ?? 0,
             token: object?["token"] as? String ?? "",
             expiration: (object?["expiration"] as? NSNumber)?.int64Value ?? 0
         )
     }
 
-    func getRelations(rtc uids: [UInt32]) async throws -> [UInt32: String] {
-        // 建议服务端返回：{ "123456": "userA", "234567": "userB" }
-        var request = URLRequest(url: URL(string: "https://your-server.com/rtc/relations")!)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "uids": uids.map { NSNumber(value: $0) }
-        ])
-        let (data, _) = try await URLSession.shared.data(for: request)
-        let object = try JSONSerialization.jsonObject(with: data) as? [String: String] ?? [:]
-        return object.reduce(into: [UInt32: String]()) { result, item in
-            guard let uid = UInt32(item.key), uid > 0, !item.value.isEmpty else { return }
-            result[uid] = item.value
-        }
-    }
+
 }
 ```
 
@@ -1311,7 +1296,7 @@ CallKitManager.shared.groupCall(groupId: groupId)
 
 </details>
 
-Example 里可在 `PublicDefines.swift` 填写 `agoraAppId`。本地调试也可临时填写 `agoraRTCUid` / `agoraRTCToken`，示例页会跳过网络请求直接交给 CallKit；生产环境必须从自己的应用服务器获取。
+Example 里可在 `PublicDefines.swift` 填写 `agoraAppId`。本地调试也可临时填写 `agoraRTCToken`，示例页会跳过网络请求直接交给 CallKit；生产环境必须从自己的应用服务器获取。
 
 # 常见问题 
 

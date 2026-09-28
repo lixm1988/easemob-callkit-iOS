@@ -60,17 +60,11 @@ public let CallKitVersion = "5.0.0"
     
     @nonobjc lazy var rtcPersistenceStore = RTCPersistenceStore()
     @nonobjc @CallAtomicUnfairLock var rtcCredentialCache: RTCCredentialRecord?
-    @nonobjc @CallAtomicUnfairLock var rtcUserIdCache: [UInt: String] = [:]
+    @nonobjc @CallAtomicUnfairLock var rtcLocalUID: UInt32 = 0
     @nonobjc @CallAtomicUnfairLock var rtcCacheAppID: String = ""
     @nonobjc @CallAtomicUnfairLock var loadedCredentialKeys: Set<String> = []
-    @nonobjc @CallAtomicUnfairLock var loadedRelationAppIDs: Set<String> = []
     @nonobjc @CallAtomicUnfairLock var rtcCredentialGeneration: UInt64 = 0
     @nonobjc @CallAtomicUnfairLock var rtcCredentialRequest: RTCCredentialRequestState?
-    @nonobjc @CallAtomicUnfairLock var rtcRelationRequests: [UInt: Task<RTCRelationResolution, Never>] = [:]
-    /// UID -> IM userId 解析失败的时间戳。用于负缓存，避免帧回调等高频路径对同一个失败 uid 反复发起网络请求。
-    @nonobjc @CallAtomicUnfairLock var rtcRelationFailures: [UInt: Date] = [:]
-    /// 解析失败后的静默期，静默期内不再对同一个 uid 发起请求。
-    @nonobjc static let rtcRelationFailureTTL: TimeInterval = 30
     @nonobjc @CallAtomicUnfairLock var rtcRefreshTask: Task<Void, Never>?
     @nonobjc private var notificationObservers: [NSObjectProtocol] = []
 
@@ -90,21 +84,12 @@ public let CallKitVersion = "5.0.0"
         }
     }
 
-    /// Current user RTC UID. Runtime access is memory-only.
+    /// Local UID assigned by RTC when joining with the current IM account. Zero before joining.
     public private(set) var currentUserRTCUID: UInt32 {
-        get { $rtcCredentialCache.withValue { $0?.uid ?? 0 } }
-        set {
-            guard tokenProvider == nil else {
-                consoleLogInfo("RTC UID is managed by CallTokenProvider and cannot be set directly.", type: .error)
-                return
-            }
-            let identity = (appID, ChatClient.shared().currentUsername ?? "")
-            $rtcCredentialCache.modify { current in
-                current = RTCCredentialRecord(appID: identity.0, userID: identity.1, uid: newValue, token: current?.token ?? "", expiration: current?.expiration ?? 0, generation: current?.generation ?? 0)
-            }
-        }
+        get { $rtcLocalUID.withValue { $0 } }
+        set { $rtcLocalUID.modify { $0 = newValue } }
     }
-    
+
     var hadJoinedChannel: Bool = false
     
     /// Last Picture-in-Picture frame
@@ -120,6 +105,9 @@ public let CallKitVersion = "5.0.0"
     
     /// The throttler for RTC callbacks
     let rtcThrottler = RTCCallbackThrottler()
+
+    @nonobjc let localVideoFrameMailbox = LatestFrameMailbox<() -> Void>()
+    @nonobjc let remoteVideoFrameMailbox = LatestFrameMailbox<() -> Void>()
     
     /// Configuration for CallKitManager
     public private(set) var config: CallKitConfig = CallKitConfig()
@@ -177,7 +165,7 @@ public let CallKitVersion = "5.0.0"
             }
         }
         let terminateObserver = NotificationCenter.default.addObserver(forName: UIApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
-            self?.hangup()
+            self?.applicationWillTerminate()
         }
         notificationObservers = [foregroundObserver, backgroundObserver, terminateObserver]
 //        return nil
@@ -351,12 +339,17 @@ public let CallKitVersion = "5.0.0"
         }
     }
     
+    /// Sends the appropriate call signaling while the application is terminating.
+    @objc public func applicationWillTerminate() {
+        guard let call = self.callInfo, !call.callId.isEmpty, call.state != .idle else { return }
+        self.hangup()
+    }
+
     /// Tears down the CallKitManager, releasing resources and stopping the player.Notice that this method should be called when the application is about to terminate or when the CallKitManager is no longer needed.
     @objc public func tearDown() {
+        self.applicationWillTerminate()
         $rtcRefreshTask.modify { task in task?.cancel(); task = nil }
         $rtcCredentialRequest.modify { state in state?.task.cancel(); state = nil }
-        $rtcRelationRequests.modify { requests in requests.values.forEach { $0.cancel() }; requests.removeAll() }
-        $rtcRelationFailures.modify { $0.removeAll() }
         if tokenProvider != nil { Task { await rtcPersistenceStore.flush() } }
         self.quitCall()
         self.itemsCache.removeAll()
@@ -375,10 +368,9 @@ public let CallKitVersion = "5.0.0"
         notificationObservers.forEach { NotificationCenter.default.removeObserver($0) }
         notificationObservers.removeAll()
         $rtcCredentialCache.modify { $0 = nil }
-        $rtcUserIdCache.modify { $0.removeAll() }
+        $rtcLocalUID.modify { $0 = 0 }
         $rtcCacheAppID.modify { $0 = "" }
         $loadedCredentialKeys.modify { $0.removeAll() }
-        $loadedRelationAppIDs.modify { $0.removeAll() }
         $rtcCredentialGeneration.modify { $0 = 0 }
         self.tokenProvider = nil
         self.appID = ""
@@ -440,14 +432,11 @@ public let CallKitVersion = "5.0.0"
         UserDefaults.standard.removeObject(forKey: "CallKitManager.token")
         UserDefaults.standard.removeObject(forKey: "CallKitManager.currentUserRTCUID")
         $rtcCredentialCache.modify { $0 = nil }
-        $rtcUserIdCache.modify { $0.removeAll() }
+        $rtcLocalUID.modify { $0 = 0 }
         $rtcCacheAppID.modify { $0 = "" }
         $loadedCredentialKeys.modify { $0.removeAll() }
-        $loadedRelationAppIDs.modify { $0.removeAll() }
         $rtcRefreshTask.modify { task in task?.cancel(); task = nil }
         $rtcCredentialRequest.modify { state in state?.task.cancel(); state = nil }
-        $rtcRelationRequests.modify { requests in requests.values.forEach { $0.cancel() }; requests.removeAll() }
-        $rtcRelationFailures.modify { $0.removeAll() }
         if shouldClearPersistence {
             Task {
                 await rtcPersistenceStore.clear(appID: appID.isEmpty ? nil : appID, userID: userID)
@@ -460,7 +449,7 @@ public let CallKitVersion = "5.0.0"
         let currentUserId = ChatClient.shared().currentUsername ?? ""
         itemsCache = itemsCache.filter { key, item in
             return item.userId == currentUserId ||
-            item.uid == self.currentUserRTCUID ||
+            (self.currentUserRTCUID != 0 && item.uid == self.currentUserRTCUID) ||
             key == currentUserId
         }
     }
@@ -468,7 +457,7 @@ public let CallKitVersion = "5.0.0"
     private func validateCanvasCache() {
         let currentUserId = ChatClient.shared().currentUsername ?? ""
         canvasCache = canvasCache.filter { key, view in
-            return key == currentUserId || view.item.uid == self.currentUserRTCUID || view.item.userId == currentUserId
+            return key == currentUserId || (self.currentUserRTCUID != 0 && view.item.uid == self.currentUserRTCUID) || view.item.userId == currentUserId
         }
     }
 }

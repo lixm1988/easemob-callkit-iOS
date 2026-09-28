@@ -11,9 +11,8 @@ struct RTCCredentialRecord: Codable, Equatable, Sendable {
 
 final class RTCPersistenceStore {
     private struct Snapshot: Codable {
-        var schemaVersion = 1
+        var schemaVersion = 2
         var credentials: [String: RTCCredentialRecord] = [:]
-        var relations: [String: [String: String]] = [:]
     }
 
     private enum Keys {
@@ -30,7 +29,7 @@ final class RTCPersistenceStore {
         self.defaults = defaults
         if let data = defaults.data(forKey: Keys.snapshot),
            let decoded = try? decoder.decode(Snapshot.self, from: data),
-           decoded.schemaVersion == 1 {
+           decoded.schemaVersion == 2 {
             snapshot = decoded
         } else {
             snapshot = Snapshot()
@@ -43,15 +42,6 @@ final class RTCPersistenceStore {
         }
     }
 
-    func loadRelations(appID: String) -> [UInt: String] {
-        queue.sync {
-            Dictionary(uniqueKeysWithValues: (snapshot.relations[appID] ?? [:]).compactMap { key, value in
-                guard let uid = UInt(key), uid > 0, !value.isEmpty else { return nil }
-                return (uid, value)
-            })
-        }
-    }
-
     func saveCredential(_ record: RTCCredentialRecord) async {
         await enqueue {
             let key = self.credentialKey(appID: record.appID, userID: record.userID)
@@ -61,25 +51,11 @@ final class RTCPersistenceStore {
         }
     }
 
-    func mergeRelations(_ relations: [UInt: String], appID: String) async {
-        await enqueue {
-            self.mergeRelationsOnQueue(relations, appID: appID)
-        }
-    }
-
-    /// Submits a non-blocking relation merge. A later `flush()` is ordered after it.
-    func scheduleMergeRelations(_ relations: [UInt: String], appID: String) {
-        queue.async {
-            self.mergeRelationsOnQueue(relations, appID: appID)
-        }
-    }
-
     func flush() async { await enqueue {} }
 
     func clear(appID: String? = nil, userID: String? = nil) async {
         await enqueue {
             if let appID = appID {
-                self.snapshot.relations.removeValue(forKey: appID)
                 self.snapshot.credentials = self.snapshot.credentials.filter { _, value in
                     value.appID != appID || (userID != nil && value.userID != userID)
                 }
@@ -97,15 +73,6 @@ final class RTCPersistenceStore {
     private func persistSnapshot() {
         guard let data = try? encoder.encode(snapshot) else { return }
         defaults.set(data, forKey: Keys.snapshot)
-    }
-
-    private func mergeRelationsOnQueue(_ relations: [UInt: String], appID: String) {
-        var current = snapshot.relations[appID] ?? [:]
-        for (uid, userID) in relations where uid > 0 && !userID.isEmpty {
-            current[String(uid)] = userID
-        }
-        snapshot.relations[appID] = current
-        persistSnapshot()
     }
 
     private func enqueue(_ operation: @escaping () -> Void) async {

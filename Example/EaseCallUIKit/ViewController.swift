@@ -42,7 +42,7 @@ class ViewController: UIViewController {
     }
 
     /// 跳转到 CallTokenProvider 新用法示例页。
-    /// 该页会用你自己的声网 AppId 初始化 CallKit，并由业务服务器提供 RTC Token 与 uid↔userId 映射。
+    /// 该页会用你自己的声网 AppId 初始化 CallKit，并由业务服务器提供按当前 IM 字符串账号签发的 RTC Token。
     @IBAction func tokenProviderAction(_ sender: Any) {
 //        let controller = TokenProviderViewController()
 //        let navigation = UINavigationController(rootViewController: controller)

@@ -5,9 +5,9 @@
 //  CallTokenProvider 新用法示例页。
 //
 //  和首页「旧用法」的区别：
-//  - 旧用法：`CallKitManager.shared.setup(config)`，登录 IM 后由 IM SDK 下发 RTC AppId / Token / uid↔userId 映射。
+//  - 旧用法：`CallKitManager.shared.setup(config)`，登录 IM 后由 IM SDK 下发 RTC AppId / Token。
 //  - 新用法：用你自己的 IM AppKey 初始化 IM SDK，再用 `setup(config, tokenProvider:)` 初始化 CallKit。
-//    RTC AppId、Token、uid，以及远端 RTC uid → IM userId 映射，全部由 CallTokenProvider 向你们自己的服务端获取。
+//    RTC AppId、Token 由 CallTokenProvider 向你们自己的服务端获取，RTC 以当前 IM 账号加入频道。
 //
 //  推荐在 App 启动时就选定其中一种，不要混用。RTC 引擎创建后不能再切换凭证来源。
 //
@@ -17,7 +17,7 @@ import EaseCallUIKit
 import QuickLook
 import AgoraRtcKit
 
-/// CallTokenProvider 示例页：演示用自己的 AppId / Token / uid 映射驱动通话。
+/// CallTokenProvider 示例页：演示用自己的 AppId / 字符串账号 Token 驱动通话。
 final class TokenProviderViewController: UIViewController {
 
     private var callType: CallType = .singleAudio
@@ -29,7 +29,7 @@ final class TokenProviderViewController: UIViewController {
         label.textAlignment = .center
         label.font = .systemFont(ofSize: 13)
         label.textColor = .secondaryLabel
-        label.text = "新用法：自己初始化 IM SDK，再用 CallTokenProvider 提供 RTC AppId、Token、uid 以及 uid↔userId 映射。首页是旧用法，登录后由 IM SDK 下发这些凭证。"
+        label.text = "新用法：自己初始化 IM SDK，再用 CallTokenProvider 提供 RTC AppId 和按当前 IM 字符串账号签发的 Token。首页是旧用法，登录后由 IM SDK 下发这些凭证。"
         return label
     }()
 
@@ -84,7 +84,7 @@ final class TokenProviderViewController: UIViewController {
     /// 新用法的核心初始化。
     ///
     /// 1. IM SDK 仍然用你自己的 AppKey 初始化（本 Example 已在 AppDelegate 完成）。
-    /// 2. CallKit 必须走带 `tokenProvider` 的 setup。之后 RTC AppId / Token / uid 映射都不再向 IM SDK 要。
+    /// 2. CallKit 必须走带 `tokenProvider` 的 setup。之后 RTC AppId / Token都不再向 IM SDK 要。
     /// 3. 如果首页已经登录并创建了 RTC 引擎，这里无法再切换凭证来源，需要重启 App 后先进入本页。
     private func setupCallKitWithTokenProvider() {
         guard !agoraAppId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -205,10 +205,10 @@ final class TokenProviderViewController: UIViewController {
 /// CallKit 会在这些时机回调本类，你只需要向自己的服务端拿数据并返回：
 /// - `getAppId()`：创建 RTC 引擎时读取，必须是稳定的声网 App ID。
 /// - `getRTCToken(withChannel:)`：登录后、进房前、Token 即将过期、回到前台时读取。当前 channel 固定传 `nil`，要求返回应用级 Token。
-/// - `getRelations(rtc:)`：远端用户进房后，把 RTC uid 解析成 IM userId，用来显示头像昵称。
+/// RTC UID 对应的账号由 RTC Engine 查询，无需业务服务器维护映射。
 ///
 /// 返回值约束：
-/// - uid 必须大于 0，同一用户应尽量保持稳定。
+/// - Token 必须按当前 IM username 作为 RTC 字符串账号签发。
 /// - expiration 为 Unix 秒；传 0 表示不过期。有效 Token 会在过期前约 5 分钟自动续期。
 /// - 除非你把 `CallKitConfig.disableRTCTokenValidation` 设为 true，否则 token 不能为空。
 final class ExampleCallTokenProvider: CallTokenProvider {
@@ -218,27 +218,20 @@ final class ExampleCallTokenProvider: CallTokenProvider {
         agoraAppId
     }
 
-    /// 收到 CallKit 的凭证请求后，向自己的服务端换取当前用户的 RTC uid / Token / 过期时间。
+    /// 收到 CallKit 的凭证请求后，向自己的服务端换取当前用户字符串账号的 RTC Token / 过期时间。
     ///
     /// - Parameter channelName: 当前实现会传入 `nil`。请签发对所有频道有效的 Token，不要按单个 channel 签发。
     func getRTCToken(withChannel channelName: String?) async throws -> CallRTCTokenInfo {
         // 生产环境必须走你们自己的应用服务器，不要把声网证书写进 App。
-        // 本方法演示一次标准请求：把当前 IM userId 发给服务端，换回 uid、token、expiration。
+        // 本方法演示一次标准请求：把当前 IM userId 发给服务端，换回 token、expiration。
         try await requestRTCTokenFromYourServer(channelName: channelName)
-    }
-
-    /// 把一组 RTC uid 解析成 IM userId。
-    ///
-    /// CallKit 只知道频道里的 uid，头像昵称要靠 IM userId 去 `CallUserProfileProvider` 再拉一次。
-    func getRelations(rtc uids: [UInt32]) async throws -> [UInt32: String] {
-        try await requestUserIdMappingFromYourServer(uids: uids)
     }
 
     /// 向自己的服务端请求当前用户的 RTC 凭证。
     ///
     /// 建议服务端返回：
     /// ```
-    /// { "uid": 123456, "token": "007eJx...", "expiration": 1710000000 }
+    /// { "token": "007eJx...", "expiration": 1710000000 }
     /// ```
     /// `expiration` 用 Unix 秒；没有过期时间就返回 0。
     private func requestRTCTokenFromYourServer(channelName: String?) async throws -> CallRTCTokenInfo {
@@ -248,9 +241,8 @@ final class ExampleCallTokenProvider: CallTokenProvider {
 
         // 如果只是本地验证协议是否接通，可以临时返回下面这组调试值。
         // 真机通话前请改成真实的服务端请求，并删除这段调试返回。
-        if !agoraRTCToken.isEmpty, agoraRTCUid > 0 {
+        if !agoraRTCToken.isEmpty {
             return CallRTCTokenInfo(
-                uid: agoraRTCUid,
                 token: agoraRTCToken,
                 expiration: agoraRTCTokenExpiration
             )
@@ -275,67 +267,24 @@ final class ExampleCallTokenProvider: CallTokenProvider {
         }
 
         let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        let uid = (object?["uid"] as? NSNumber)?.uint32Value ?? 0
         let token = object?["token"] as? String ?? ""
         let expiration = (object?["expiration"] as? NSNumber)?.int64Value ?? 0
-        guard uid > 0 else {
-            throw ExampleTokenProviderError.invalidUID
-        }
-        return CallRTCTokenInfo(uid: uid, token: token, expiration: expiration)
+        return CallRTCTokenInfo(token: token, expiration: expiration)
     }
 
-    /// 向自己的服务端批量查询 uid → IM userId。
-    ///
-    /// 建议服务端返回：
-    /// ```
-    /// { "123456": "userA", "234567": "userB" }
-    /// ```
-    /// 空 userId 或 uid 为 0 的条目会被 CallKit 丢弃。
-    private func requestUserIdMappingFromYourServer(uids: [UInt32]) async throws -> [UInt32: String] {
-        if !agoraRTCUidToUserId.isEmpty {
-            return uids.reduce(into: [UInt32: String]()) { result, uid in
-                if let userId = agoraRTCUidToUserId[uid], !userId.isEmpty {
-                    result[uid] = userId
-                }
-            }
-        }
 
-        guard let url = URL(string: "\(tokenProviderBaseURL)/rtc/relations") else {
-            throw ExampleTokenProviderError.invalidURL
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "uids": uids.map { NSNumber(value: $0) }
-        ])
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            throw ExampleTokenProviderError.serverFailed
-        }
-
-        let object = try JSONSerialization.jsonObject(with: data) as? [String: String] ?? [:]
-        return object.reduce(into: [UInt32: String]()) { result, item in
-            guard let uid = UInt32(item.key), uid > 0, !item.value.isEmpty else { return }
-            result[uid] = item.value
-        }
-    }
 }
 
 private enum ExampleTokenProviderError: LocalizedError {
     case notLogin
     case invalidURL
     case serverFailed
-    case invalidUID
 
     var errorDescription: String? {
         switch self {
         case .notLogin: return "CallTokenProvider 需要先登录 IM，才能按当前用户换取 RTC Token。"
         case .invalidURL: return "tokenProviderBaseURL 无效，请在 PublicDefines.swift 中填写你们的服务地址。"
         case .serverFailed: return "向业务服务器获取 RTC 凭证失败。"
-        case .invalidUID: return "服务端返回的 RTC uid 不能为 0。"
         }
     }
 }

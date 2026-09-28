@@ -17,21 +17,18 @@ let token: String = "1"
 
 // MARK: - CallTokenProvider 新用法配置
 // 首页旧用法不需要填下面这些。只有进入 TokenProvider 示例页时才用到。
-// 生产环境请把 Token / uid 映射放到你们自己的应用服务器，不要把证书写进客户端。
+// 生产环境请把 字符串账号的 RTC Token放到你们自己的应用服务器，不要把证书写进客户端。
 
 /// 你自己的声网 App ID。CallTokenProvider.getAppId() 会原样返回它，用来创建 RTC 引擎。
-let agoraAppId: String = "94bcf24825644c26b7f1872c5a0f5084"
+let agoraAppId: String = "your-agora-app-id"
 
-/// 你们自己签发 RTC Token 的服务地址。示例页会请求 `{base}/rtc/token` 和 `{base}/rtc/relations`。
+/// 你们自己签发 RTC Token 的服务地址。示例页会请求 `{base}/rtc/token`，按 currentUsername 字符串账号签发。
 let tokenProviderBaseURL: String = "https://your-server.com"
 
-/// 本地调试用。填了 uid 和 token 时，示例页会跳过网络请求，直接把这组值交给 CallKit。
-let agoraRTCUid: UInt32 = 0
+/// 本地调试用。填了字符串账号的 token 时，示例页会跳过网络请求，直接把这组值交给 CallKit。
 let agoraRTCToken: String = ""
 /// Token 过期时间，Unix 秒。0 表示不过期。正式环境请用服务端返回的真实过期时间。
 let agoraRTCTokenExpiration: Int64 = 0
-/// 本地调试用的 uid → IM userId 映射。正式环境请留空，改走服务端 `/rtc/relations`。
-let agoraRTCUidToUserId: [UInt32: String] = [:]
 
 
 
