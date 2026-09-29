@@ -56,7 +56,7 @@ extension CallKitManager: CallSignalingManagerDelegate {
                                        mediaType: CallSignalingMediaType, conversationId: String?, ext: String?) -> CallInfo {
         let type = signalingCallType(kind: kind, mediaType: mediaType)
         let info = CallInfo(callId: callId, callerId: inviterId, callerDeviceId: "",
-                            channelName: "channel-\(callId)", type: type,
+                            channelName: callId, type: type,
                             extensionInfo: signalingDictionary(ext))
         if type == .groupCall { info.groupId = conversationId }
         info.calleeId = ChatClient.shared().currentUsername ?? ""
@@ -1080,7 +1080,7 @@ extension CallKitManager: CallMessageService {
         
         // Generate call info first
         let callId = UUID().uuidString
-        let channelName = "channel-\(callId)"
+        let channelName = callId
         
         // Create CallInfo before showing UI
         self.callInfo = CallInfo(
@@ -1157,7 +1157,7 @@ extension CallKitManager: CallMessageService {
             return
         }
         let request = CallCreateRequest(kind: signalingCallKind(type), mediaType: signalingMediaType(type), targetUserIds: [userId])
-        request.timeoutSeconds = UInt(config.ringTimeOut)
+        request.timeoutSeconds = UInt(callTimeout)
         request.conversationId = nil
         request.pushTitle = extensionInfo?["pushTitle"] as? String
         request.pushContent = extensionInfo?["pushContent"] as? String
@@ -1171,7 +1171,7 @@ extension CallKitManager: CallMessageService {
             }
             let actualCallId = result?.snapshot?.callId ?? callId
             self.callInfo?.callId = actualCallId
-            self.callInfo?.channelName = "channel-\(actualCallId)"
+            self.callInfo?.channelName = actualCallId
             self.callInfo?.extensionInfo = extensionInfo
             self.callStartTimerStart(callId: actualCallId)
             self.joinChannel(channelName: self.callInfo?.channelName ?? channelName) { [weak self] success in
@@ -1274,7 +1274,7 @@ extension CallKitManager: CallMessageService {
         self.engine?.setVideoScenario(.applicationMeetingScenario)
         
         var callId = UUID().uuidString
-        var channelName = "channel-\(callId)"
+        var channelName = callId
         
         // Handle existing call scenario
         if let call = self.callInfo, !call.callId.isEmpty{
@@ -1395,7 +1395,7 @@ extension CallKitManager: CallMessageService {
             }
             if let actualCallId = result?.snapshot?.callId, actualCallId != callId {
                 self.callInfo?.callId = actualCallId
-                self.callInfo?.channelName = "channel-\(actualCallId)"
+                self.callInfo?.channelName = actualCallId
             }
             self.callInfo?.inviteUsers = targets
             self.callInfo?.extensionInfo = extensionInfo
@@ -1415,7 +1415,7 @@ extension CallKitManager: CallMessageService {
                                        completion: completion)
         } else {
             let request = CallCreateRequest(kind: .conference, mediaType: .video, targetUserIds: targets)
-            request.timeoutSeconds = UInt(config.ringTimeOut)
+            request.timeoutSeconds = UInt(callTimeout)
             request.conversationId = groupId
             request.pushTitle = extensionInfo?["pushTitle"] as? String
             request.pushContent = extensionInfo?["pushContent"] as? String
@@ -1513,7 +1513,7 @@ extension CallKitManager: CallMessageService {
         }
         let targets = ids.filter { $0 != ChatClient.shared().currentUsername }
         let request = CallCreateRequest(kind: .conference, mediaType: .video, targetUserIds: targets)
-        request.timeoutSeconds = 60
+        request.timeoutSeconds = callTimeout
         request.conversationId = groupId
         request.pushTitle = extensionInfo?["pushTitle"] as? String
         request.pushContent = extensionInfo?["pushContent"] as? String
@@ -1527,7 +1527,7 @@ extension CallKitManager: CallMessageService {
             }
             let actualCallId = result?.snapshot?.callId ?? callId
             self.callInfo?.callId = actualCallId
-            self.callInfo?.channelName = "channel-\(actualCallId)"
+            self.callInfo?.channelName = actualCallId
             self.callInfo?.inviteUsers = targets
             self.callInfo?.extensionInfo = extensionInfo
             self.callStartTimerStart(callId: actualCallId + " users:" + ids.joined(separator: ","))
