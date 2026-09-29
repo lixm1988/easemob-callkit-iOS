@@ -9,6 +9,12 @@ enum CallParticipantRemovalPolicy {
         terminalStates.contains(state)
     }
 
+    static func terminalStateForCurrentUser(_ currentUser: String,
+                                            reportedStates: [String: Int]) -> Int? {
+        guard let state = reportedStates[currentUser], isTerminal(state) else { return nil }
+        return state
+    }
+
     static func usersToRemove(cachedUsers: Set<String>, currentUser: String,
                               reportedStates: [String: Int]) -> Set<String> {
         Set(reportedStates.compactMap { userID, state in

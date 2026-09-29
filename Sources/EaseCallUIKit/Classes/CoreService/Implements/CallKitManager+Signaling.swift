@@ -171,6 +171,14 @@ extension CallKitManager: CallSignalingManagerDelegate {
             consoleLogInfo("Participants changed applying callId: \(callId), type: \(call.type), state: \(call.state)", type: .debug)
             let currentUserId = ChatClient.shared().currentUsername ?? ""
             let participantByUserId = Dictionary(participants.map { ($0.userId, $0) }, uniquingKeysWith: { _, latest in latest })
+            let reportedStates = participantByUserId.mapValues { $0.state.rawValue }
+            if let localTerminalState = CallParticipantRemovalPolicy.terminalStateForCurrentUser(
+                currentUserId, reportedStates: reportedStates
+            ) {
+                self.receivedCalls.removeValue(forKey: callId)
+                self.updateCallEndReason(self.endReasonForParticipant(localTerminalState, local: true))
+                return
+            }
             let remoteParticipants = participants.filter { $0.userId != currentUserId }
             let remoteAccepted = remoteParticipants.contains { $0.state == .accepted }
             let localAccepted = participantByUserId[currentUserId]?.state == .accepted
@@ -231,7 +239,6 @@ extension CallKitManager: CallSignalingManagerDelegate {
             if addedItem {
                 (UIViewController.currentController as? CallMultiViewController)?.callView.updateWithItems()
             }
-            let reportedStates = participantByUserId.mapValues { $0.state.rawValue }
             let removedUsers = call.type == .groupCall
                 ? Array(CallParticipantRemovalPolicy.usersToRemove(
                     cachedUsers: Set(self.itemsCache.keys), currentUser: currentUserId,
