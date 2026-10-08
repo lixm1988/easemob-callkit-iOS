@@ -334,6 +334,9 @@ extension CallKitManager: CallSignalingManagerDelegate {
     public func callDidEnd(_ callId: String, reason: CallSignalingEndReason) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            if reason == .hangup || reason == .lastLeft {
+                self.logCallDuration(callId: callId)
+            }
             let isLocal = self.callInfo?.callerId == ChatClient.shared().currentUsername
             let mapped = self.signalingEndReason(reason, local: isLocal)
             if self.callInfo?.callId == callId {
@@ -347,6 +350,27 @@ extension CallKitManager: CallSignalingManagerDelegate {
         }
     }
     
+    private func logCallDuration(callId: String) {
+        guard let snapshot = self.signalingManager?.getCallSnapshot(callId),
+              snapshot.establishedAt > 0 else { return }
+        let endTime: Int
+        if snapshot.kind == .conference {
+            guard let userId = ChatClient.shared().currentUsername,
+                  let participant = snapshot.participants.first(where: { $0.userId == userId }) else { return }
+            endTime = participant.leftAt
+        } else {
+            endTime = snapshot.endedAt
+        }
+        logCallDuration(callId: callId, establishedAt: snapshot.establishedAt, endTime: endTime)
+    }
+
+    private func logCallDuration(callId: String, establishedAt: Int, endTime: Int) {
+        guard establishedAt > 0, endTime >= establishedAt else { return }
+        // Signaling timestamps are server Unix milliseconds.
+        let duration = UInt((endTime - establishedAt) / 1000)
+        consoleLogInfo("Call duration callId: \(callId), duration: \(duration)s", type: .info)
+    }
+
     private struct CallEndReasonSnapshot: Sendable {
         let info: CallInfo
         let inviteMessageId: String
@@ -1745,12 +1769,18 @@ extension CallKitManager: CallMessageService {
             return
         }
         consoleLogInfo("Sending leaveCall for callId: \(callId)", type: .info)
-        manager.leaveCall(callId) { [weak self] _, error in
+        let userId = ChatClient.shared().currentUsername
+        manager.leaveCall(callId) { [weak self] result, error in
             if let error {
                 consoleLogInfo("leaveCall failed for callId: \(callId), error: \(String(describing: error.errorDescription))", type: .error)
                 self?.notifySignalingError(error)
             } else {
                 consoleLogInfo("leaveCall succeeded for callId: \(callId)", type: .info)
+                if let userId, let snapshot = result?.snapshot,
+                   let participant = snapshot.participants.first(where: { $0.userId == userId }) {
+                    self?.logCallDuration(callId: callId, establishedAt: snapshot.establishedAt,
+                                          endTime: participant.leftAt)
+                }
             }
         }
         return
@@ -2368,13 +2398,18 @@ extension CallKitManager: TimerServiceListener {
             if timerIdentify.contains(" users:") {//群组中发起通话邀请成员超时
                 if seconds >= self.config.ringTimeOut, call.type == .groupCall {
                     let waitingUsers = Set(self.itemsCache.compactMap { $0.value.waiting ? $0.key : nil })
-                    let users = GroupInviteTimeoutPolicy.usersToUnmask(
+                    let users = GroupInviteTimeoutPolicy.usersToRemove(
                         timerIdentifier: timerIdentify, callID: call.callId, waitingUsers: waitingUsers)
-                    consoleLogInfo("Group invite timer expired callId: \(call.callId), timer: \(timerIdentify), usersToUnmask: \(users)", type: .debug)
-                    for userId in users {
-                        guard let item = self.itemsCache[userId] else { continue }
-                        item.waiting = false
-                        self.canvasCache[userId]?.updateItem(item)
+                    consoleLogInfo("Group invite timer expired callId: \(call.callId), timer: \(timerIdentify), usersToRemove: \(users)", type: .debug)
+                    if let controller = (UIViewController.currentController as? CallMultiViewController)
+                        ?? (self.callVC as? CallMultiViewController) {
+                        controller.callView.removeTimedOutInvitations(users, callID: call.callId)
+                    } else {
+                        for userId in users where self.itemsCache[userId]?.waiting == true {
+                            self.itemsCache.removeValue(forKey: userId)
+                            self.canvasCache[userId]?.removeFromSuperview()
+                            self.canvasCache.removeValue(forKey: userId)
+                        }
                     }
                     GlobalTimerManager.shared.removeTimeAsSimilarKey(timerIdentify)
                 }

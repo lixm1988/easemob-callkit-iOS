@@ -280,6 +280,27 @@ public class MultiPersonCallView: UIView {
     func updateItem(_ item: CallStreamItem) {
         CallKitManager.shared.canvasCache[item.userId]?.updateItem(item)
     }
+
+    func removeTimedOutInvitations(_ userIDs: [String], callID: String) {
+        addPendingOperation { [weak self] in
+            guard let self else { return }
+            let manager = CallKitManager.shared
+            guard manager.callInfo?.callId == callID else {
+                self.setAnimating(false)
+                return
+            }
+            let expiredUsers = userIDs.filter { manager.itemsCache[$0]?.waiting == true }
+            for userID in expiredUsers {
+                manager.itemsCache.removeValue(forKey: userID)
+                manager.canvasCache[userID]?.removeFromSuperview()
+                manager.canvasCache.removeValue(forKey: userID)
+            }
+            if !expiredUsers.isEmpty {
+                self.setupViews()
+            }
+            self.setAnimating(false)
+        }
+    }
     
     func updateUsersInfo(_ usersInfo: [String]) {
         for userId in usersInfo {

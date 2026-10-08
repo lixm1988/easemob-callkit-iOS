@@ -1,7 +1,7 @@
 import Foundation
 
 enum GroupInviteTimeoutPolicy {
-    static func usersToUnmask(timerIdentifier: String, callID: String,
+    static func usersToRemove(timerIdentifier: String, callID: String,
                               waitingUsers: Set<String>) -> [String] {
         let prefix = "call-\(callID) users:"
         let suffix = "-start-timer"
