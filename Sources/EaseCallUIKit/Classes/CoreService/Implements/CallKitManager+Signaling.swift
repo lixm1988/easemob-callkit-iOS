@@ -95,14 +95,29 @@ extension CallKitManager: CallSignalingManagerDelegate {
                                   mediaType: CallSignalingMediaType, conversationId: String?, ext: String?) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            guard self.callInfo == nil || self.callInfo?.state == .idle else {
+            switch CallInvitationPolicy.action(existingCallID: self.callInfo?.callId,
+                                               existingCallIsIdle: self.callInfo?.state == .idle,
+                                               incomingCallID: callId) {
+            case .ignoreDuplicate:
+                consoleLogInfo("Ignore duplicate invitation for callId: \(callId)", type: .debug)
+                if #available(iOS 17.4, *), self.config.enableVOIP {
+                    LiveCommunicationManager.shared.signalingInvitationReceived(callID: callId)
+                }
+                return
+            case .rejectBusy:
                 self.signalingManager?.rejectCall(callId, reason: .busy, completion: nil)
                 return
+            case .receive:
+                break
             }
+
             let info = self.callInfoForInvitation(callId: callId, inviterId: inviterId, kind: kind,
                                                   mediaType: mediaType, conversationId: conversationId, ext: ext)
             self.receivedCalls[callId] = info
             self.callInfo = info
+            if #available(iOS 17.4, *), self.config.enableVOIP {
+                LiveCommunicationManager.shared.signalingInvitationReceived(callID: callId)
+            }
             for listener in self.listeners.allObjects {
                 listener.onReceivedCall?(callType: info.type, userId: inviterId, extensionInfo: info.extensionInfo ?? [:])
             }
@@ -842,6 +857,10 @@ extension CallKitManager: CallSignalingManagerDelegate {
             consoleLogInfo("Skip updating call end reason because call info is empty", type: .error)
             return
         }
+        if pendingVoIPRejectionCallID == snapshot.info.callId {
+            consoleLogInfo("Defer call cleanup until VoIP rejection completes: \(snapshot.info.callId)", type: .debug)
+            return
+        }
         
         if immediateCallback {
             if snapshot.isCurrentCall {
@@ -1034,47 +1053,6 @@ extension CallKitManager: CallMessageService {
     
     
     public func call(with userId: String, type: CallType, extensionInfo: [String : Any]? = nil) {
-        if self.currentUserInfo == nil {
-            if let currentUserId = ChatClient.shared().currentUsername {
-                Task {
-                    let profiles = await self.profileProvider?.fetchUserProfiles(profileIds: [currentUserId])
-                    if let profile = profiles?.first {
-                        self.currentUserInfo = profile
-                        self.usersCache[currentUserId] = profile
-                        self.updateSingleControllerUI(type: type)
-                    } else {
-                        consoleLogInfo("Failed to fetch user profile for ID: \(currentUserId)", type: .error)
-                        self.handleBusinessError(CallError.CallBusiness(error: .param, message: "Failed to fetch user profile"))
-                    }
-                }
-            }
-            
-            if self.profileProvider != nil,self.usersCache[userId] == nil {
-                Task {
-                    let profiles = await self.profileProvider?.fetchUserProfiles(profileIds: [userId])
-                    if let profile = profiles?.first {
-                        self.currentUserInfo = profile
-                        self.usersCache[userId] = profile
-                        self.updateSingleControllerUI(type: type)
-                    } else {
-                        consoleLogInfo("Failed to fetch user profile for ID: \(userId)", type: .error)
-                        self.handleBusinessError(CallError.CallBusiness(error: .param, message: "Failed to fetch user profile"))
-                    }
-                }
-            }
-            if self.profileProviderOC != nil {
-                self.profileProviderOC?.fetchProfiles(profileIds: [userId], completion: { profiles in
-                    if let profile = profiles.first {
-                        self.currentUserInfo = profile
-                        self.usersCache[userId] = profile
-                        self.updateSingleControllerUI(type: type)
-                    } else {
-                        consoleLogInfo("Failed to fetch user profile for ID: \(userId)", type: .error)
-                        self.handleBusinessError(CallError.CallBusiness(error: .param, message: "Failed to fetch user profile"))
-                    }
-                })
-            }
-        }
         if userId.isEmpty {
             consoleLogInfo("User ID cannot be empty", type: .error)
             self.handleBusinessError(CallError.CallBusiness(error: .param, message: "User ID cannot be empty"))
@@ -1099,6 +1077,56 @@ extension CallKitManager: CallMessageService {
             self.handleBusinessError(CallError.CallBusiness(error: .state, message: "A call is already in progress"))
             consoleLogInfo("A call is already in progress: callId:\(call.callId)", type: .error)
             return
+        }
+        let currentUserId = ChatClient.shared().currentUsername
+
+        if currentUserInfo == nil, let currentUserId, let profileProvider {
+            Task {
+                let profiles = await profileProvider.fetchUserProfiles(profileIds: [currentUserId])
+                if let profile = profiles.first(where: { $0.id == currentUserId }) {
+                    await MainActor.run {
+                        guard ChatClient.shared().currentUsername == currentUserId else { return }
+                        self.currentUserInfo = profile
+                    }
+                } else {
+                    consoleLogInfo("Failed to fetch user profile for ID: \(currentUserId)", type: .error)
+                }
+            }
+        }
+
+        if shouldFetchUserProfile(userId) {
+            if let profileProvider {
+                Task {
+                    let profiles = await profileProvider.fetchUserProfiles(profileIds: [userId])
+                    if let profile = profiles.first(where: { $0.id == userId }) {
+                        await MainActor.run {
+                            guard ChatClient.shared().currentUsername == currentUserId else { return }
+                            self.usersCache[userId] = profile
+                            self.markUserProfileFetched(userId)
+                            if self.callInfo?.calleeId == userId {
+                                self.updateSingleControllerUI(type: type)
+                            }
+                        }
+                    } else {
+                        consoleLogInfo("Failed to fetch user profile for ID: \(userId)", type: .error)
+                    }
+                }
+            } else if let profileProviderOC {
+                profileProviderOC.fetchProfiles(profileIds: [userId]) { profiles in
+                    guard let profile = profiles.first(where: { $0.id == userId }) else {
+                        consoleLogInfo("Failed to fetch user profile for ID: \(userId)", type: .error)
+                        return
+                    }
+                    DispatchQueue.main.async {
+                        guard ChatClient.shared().currentUsername == currentUserId else { return }
+                        self.usersCache[userId] = profile
+                        self.markUserProfileFetched(userId)
+                        if self.callInfo?.calleeId == userId {
+                            self.updateSingleControllerUI(type: type)
+                        }
+                    }
+                }
+            }
         }
         
         // Setup engine first
@@ -1190,8 +1218,8 @@ extension CallKitManager: CallMessageService {
         let request = CallCreateRequest(kind: signalingCallKind(type), mediaType: signalingMediaType(type), targetUserIds: [userId])
         request.timeoutSeconds = UInt(callTimeout)
         request.conversationId = nil
-        request.pushTitle = extensionInfo?["pushTitle"] as? String
-        request.pushContent = extensionInfo?["pushContent"] as? String
+        request.pushTitle = "Incoming Call"
+        request.pushContent =  "\(ChatClient.shared().currentUsername ?? "") is calling you a \(type == .singleAudio ? "audio" : "video") call"
         request.ext = signalingJSON(extensionInfo)
         manager.createCall(request) { [weak self] result, error in
             guard let self else { return }
@@ -1448,8 +1476,8 @@ extension CallKitManager: CallMessageService {
             let request = CallCreateRequest(kind: .conference, mediaType: .video, targetUserIds: targets)
             request.timeoutSeconds = UInt(callTimeout)
             request.conversationId = groupId
-            request.pushTitle = extensionInfo?["pushTitle"] as? String
-            request.pushContent = extensionInfo?["pushContent"] as? String
+            request.pushTitle = "Incoming Call"
+            request.pushContent = "\(ChatClient.shared().currentUsername ?? "") is calling you a group video call"
             request.ext = signalingJSON(extensionInfo)
             manager.createCall(request, completion: completion)
         }
@@ -1546,8 +1574,8 @@ extension CallKitManager: CallMessageService {
         let request = CallCreateRequest(kind: .conference, mediaType: .video, targetUserIds: targets)
         request.timeoutSeconds = callTimeout
         request.conversationId = groupId
-        request.pushTitle = extensionInfo?["pushTitle"] as? String
-        request.pushContent = extensionInfo?["pushContent"] as? String
+        request.pushTitle = "Incoming Call"
+        request.pushContent = "\(ChatClient.shared().currentUsername ?? "") is calling you a group video call"
         request.ext = signalingJSON(extensionInfo)
         manager.createCall(request) { [weak self] result, error in
             guard let self else { return }
@@ -1916,15 +1944,33 @@ extension CallKitManager: CallMessageService {
     ///   - callerId: The ID of the caller.
     ///   - result: The result of the call, such as "accept", "busy", or "refuse".
     ///   - callerDeviceId: The device ID of the caller.
-    func answerCall(callId: String,callerId: String,result: String,callerDeviceId: String) {
+    func answerCall(callId: String,callerId: String,result: String,callerDeviceId: String,
+                    signalingCompletion: ((Bool) -> Void)? = nil) {
         guard let manager = signalingManager else {
             handleBusinessError(CallError.CallBusiness(error: .signaling, message: "Call signaling manager is unavailable"))
+            signalingCompletion?(false)
             return
         }
         let completion: CallCompletion = { [weak self] _, error in
-            guard let self else { return }
-            if let error { self.notifySignalingError(error); return }
+            if result != kAcceptResult {
+                consoleLogInfo("call.reject.callback stage=swift_entry call=\(callId) result=\(result) success=\(error == nil) main_thread=\(Thread.isMainThread)", type: .debug)
+            }
+            guard let self else { signalingCompletion?(false); return }
+            if let error {
+                // Output log to sdk file
+                consoleLogInfo("Failed to answer \(result) call: \(String(describing: error.errorDescription))", type: .error)
+                self.notifySignalingError(error)
+                signalingCompletion?(false)
+                return
+            }
             if result == kAcceptResult {
+                let currentCall = self.callInfo
+                guard currentCall?.callId == callId, currentCall?.state != .idle else {
+                    self.signalingManager?.terminateCall(callId, completion: nil)
+                    signalingCompletion?(false)
+                    return
+                }
+                signalingCompletion?(true)
                 let joinAcceptedCall = { [weak self] in
                     guard let self, let call = self.callInfo, call.callId == callId else { return }
                     if call.state != .answering {
@@ -1951,6 +1997,8 @@ extension CallKitManager: CallMessageService {
                 } else {
                     DispatchQueue.main.async(execute: joinAcceptedCall)
                 }
+            } else {
+                signalingCompletion?(true)
             }
         }
         if result == kAcceptResult {
@@ -1998,6 +2046,14 @@ extension CallKitManager: CallMessageService {
     }
     
     public func hangup() {
+        hangup(rejectionCompletion: nil)
+    }
+
+    func hangupForVoIPRejection(completion: @escaping (Bool) -> Void) {
+        hangup(rejectionCompletion: completion)
+    }
+
+    private func hangup(rejectionCompletion: ((Bool) -> Void)?) {
         consoleLogInfo("Hangup called", type: .info)
         if let call = self.callInfo {
             consoleLogInfo("Hangup callId: \(call.callId), type: \(call.type), state: \(call.state)", type: .info)
@@ -2018,8 +2074,25 @@ extension CallKitManager: CallMessageService {
                 }
                 self.updateCallEndReason(.cancel)
             case .ringing:
-                self.answerCall(callId: call.callId, callerId: call.callerId, result: kRefuseResult, callerDeviceId: call.callerDeviceId)
-                self.updateCallEndReason(.refuse)
+                if let rejectionCompletion {
+                    let callID = call.callId
+                    pendingVoIPRejectionCallID = callID
+                    self.answerCall(callId: callID, callerId: call.callerId, result: kRefuseResult,
+                                    callerDeviceId: call.callerDeviceId) { [weak self] success in
+                        let callbackReceivedAt = ProcessInfo.processInfo.systemUptime
+                        consoleLogInfo("call.reject.callback stage=voip_completion call=\(callID) success=\(success) main_thread=\(Thread.isMainThread)", type: .debug)
+                        DispatchQueue.main.async { [weak self] in
+                            let delayMs = Int((ProcessInfo.processInfo.systemUptime - callbackReceivedAt) * 1000)
+                            consoleLogInfo("call.reject.callback stage=main_queue call=\(callID) delay_ms=\(delayMs)", type: .debug)
+                            self?.finishVoIPRejectionIfNeeded(callID: callID)
+                            rejectionCompletion(success)
+                        }
+                    }
+                } else {
+                    self.answerCall(callId: call.callId, callerId: call.callerId, result: kRefuseResult,
+                                    callerDeviceId: call.callerDeviceId)
+                    self.updateCallEndReason(.refuse)
+                }
             default:
                 break
             }
@@ -2029,11 +2102,27 @@ extension CallKitManager: CallMessageService {
             }
         }
     }
+
+    func finishVoIPRejectionIfNeeded(callID: String) {
+        if pendingVoIPRejectionCallID == callID {
+            pendingVoIPRejectionCallID = nil
+        }
+        guard callInfo?.callId == callID else { return }
+        updateCallEndReason(.refuse)
+    }
     
     public func accept() {
+        accept(signalingCompletion: nil)
+    }
+
+    func acceptForVoIP(signalingCompletion: @escaping (Bool) -> Void) {
+        accept(signalingCompletion: signalingCompletion)
+    }
+
+    private func accept(signalingCompletion: ((Bool) -> Void)?) {
         guard Thread.isMainThread else {
             DispatchQueue.main.async { [weak self] in
-                self?.accept()
+                self?.accept(signalingCompletion: signalingCompletion)
             }
             return
         }
@@ -2057,7 +2146,10 @@ extension CallKitManager: CallMessageService {
             }
             self.engine?.enableAudio()
             self.enableLocalAudio(true)
-            self.answerCall(callId: call.callId, callerId: call.callerId, result: kAcceptResult, callerDeviceId: call.callerDeviceId)
+            self.answerCall(callId: call.callId, callerId: call.callerId, result: kAcceptResult,
+                            callerDeviceId: call.callerDeviceId, signalingCompletion: signalingCompletion)
+        } else {
+            signalingCompletion?(false)
         }
     }
     
@@ -2130,13 +2222,8 @@ extension CallKitManager: CallMessageService {
             }
             return
         }
-        let config = AgoraRtcChannelMediaOptions()
-        config.autoSubscribeAudio = true
-        config.autoSubscribeVideo = true
-        config.publishCameraTrack = true
-        config.publishMicrophoneTrack = true
-        config.clientRoleType = .broadcaster
-        config.channelProfile = .liveBroadcasting
+        engine.setClientRole(.broadcaster)
+        engine.setChannelProfile(.liveBroadcasting)
         guard let currentUser = ChatClient.shared().currentUsername, !currentUser.isEmpty,
               currentUser == credential.userID else {
             DispatchQueue.main.async { completion(false) }
@@ -2145,8 +2232,9 @@ extension CallKitManager: CallMessageService {
         consoleLogInfo("\(currentUser) joining channel: \(channelName) with userAccount: \(currentUser)", type: .debug)
         let joinToken = self.config.disableRTCTokenValidation || credential.token.isEmpty ? nil : credential.token
         consoleLogInfo("joinToken is nil:\(joinToken == nil)", type: .debug)
-        let result = engine.joinChannel(byToken: joinToken, channelId: channelName, userAccount: currentUser, mediaOptions: config, joinSuccess: { [weak self] channel, joinedUid, elapsed in
+        let result = engine.joinChannel(byToken: joinToken, channelId: channelName, userAccount: currentUser, joinSuccess: { [weak self] channel, joinedUid, elapsed in
             guard let `self` = self else { return  }
+            engine.muteLocalAudioStream(false)
             consoleLogInfo("\(currentUser) joined channel: \(channel) with uid: \(joinedUid) elapsed: \(elapsed): account \(ChatClient.shared().currentUsername ?? "")", type: .debug)
             guard ChatClient.shared().currentUsername == currentUser,
                   self.callInfo?.channelName == channel else { return }
@@ -2222,6 +2310,7 @@ extension CallKitManager: CallMessageService {
     
     func quitCall() {
         if self.callInfo != nil {
+            let endingCallID = self.callInfo?.callId ?? ""
             self.hadJoinedChannel = false
             $rtcLocalUID.modify { $0 = 0 }
             DispatchQueue.main.async {
@@ -2278,6 +2367,8 @@ extension CallKitManager: CallMessageService {
             self.callInfo?.state = .idle
             self.callInfo?.duration = 0
             self.callInfo = nil
+            if #available(iOS 17.4, *),self.config.enableVOIP {                LiveCommunicationManager.shared.restoreBackgroundAfterNonRejectCallEnd(callID: endingCallID)
+            }
         }
     }
     

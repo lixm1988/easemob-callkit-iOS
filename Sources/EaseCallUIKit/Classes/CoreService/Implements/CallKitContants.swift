@@ -38,5 +38,5 @@ public let kPush_payload = "em_push_ext"
 public let kPush_iOS_payload_apns = "em_apns_ext"
 
 public let ringingTimeout: UInt = 30
-public let callTimeout: UInt = 10
+public let callTimeout: UInt = 30
 public let updateDuration: UInt = 5

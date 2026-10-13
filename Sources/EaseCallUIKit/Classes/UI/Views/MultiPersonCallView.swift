@@ -341,22 +341,13 @@ public class MultiPersonCallView: UIView {
     
     private func updateAllDisplayModes() {
         let itemViews = CallKitManager.shared.canvasCache.values
-        let totalCount = itemViews.count
         if expandedView != nil {
             for view in itemViews {
                 view.displayMode = (view == expandedView ? .all:.hidden)
             }
         } else {
             for view in itemViews {
-                if totalCount > 6 {
-                    view.displayMode = view.item.waiting ? .nameOnly:.buttonsOnly
-                } else {
-                    if ScreenHeight/ScreenWidth > 1.8,totalCount <= 4 {
-                        view.displayMode = view.item.waiting ? .nameOnly:.all
-                    } else {
-                        view.displayMode = view.item.waiting ? .nameOnly:.buttonsOnly
-                    }
-                }
+                view.displayMode = view.item.waiting ? .nameOnly : .all
             }
         }
     }

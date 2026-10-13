@@ -108,6 +108,7 @@ open class CallMultiViewController: UIViewController {
     
     open override func viewDidLoad() {
         super.viewDidLoad()
+        ensureLocalStreamView()
         let state = self.connected
         self.view.addSubViews([self.background, self.navigationBar,self.bottomView,self.callView])
         if state {
@@ -129,6 +130,24 @@ open class CallMultiViewController: UIViewController {
         }
         self.bottomView.didTapButton = { [weak self] in
             self?.bottomClick(type: $0)
+        }
+    }
+
+    private func ensureLocalStreamView() {
+        guard CallKitManager.shared.callInfo?.type == .groupCall,
+              let userId = ChatClient.shared().currentUsername, !userId.isEmpty else { return }
+        let manager = CallKitManager.shared
+        let item: CallStreamItem
+        if let existing = manager.itemsCache[userId] {
+            item = existing
+        } else {
+            item = CallStreamItem(userId: userId, index: 0)
+            item.uid = manager.currentUserRTCUID
+            item.videoMuted = true
+            manager.itemsCache[userId] = item
+        }
+        if manager.canvasCache[userId] == nil {
+            manager.canvasCache[userId] = CallStreamView(item: item)
         }
     }
     

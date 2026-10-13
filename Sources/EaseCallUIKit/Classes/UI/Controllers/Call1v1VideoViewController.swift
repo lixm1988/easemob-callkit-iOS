@@ -92,6 +92,7 @@ open class Call1v1VideoViewController: UIViewController {
     public internal(set) var videoCallbackController: AVPictureInPictureVideoCallViewController?
     
     var firstRemoteVideoAppeared = false
+    var remoteCameraMuted = false
         
     @objc public init(role: CallRole) {
         self.role = role

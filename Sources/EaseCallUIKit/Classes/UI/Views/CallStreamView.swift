@@ -127,7 +127,7 @@ public class CallStreamView: UIImageView {
             loadingView.heightAnchor.constraint(equalTo: loadingView.widthAnchor),
             userInfoView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             userInfoView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
-            userInfoView.trailingAnchor.constraint(lessThanOrEqualTo: centerXAnchor),
+            userInfoView.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8),
             userInfoView.heightAnchor.constraint(equalToConstant: 22)
         ])
         userInfoView.cornerRadius(11)
@@ -172,6 +172,7 @@ public class CallStreamView: UIImageView {
         self.userInfoView.isAudioMuted = newItem.audioMuted
         let avatarURL = CallKitManager.shared.usersCache[newItem.userId]?.avatarURL ?? ""
         self.imageView.image(with: avatarURL, placeHolder: CallAppearance.avatarPlaceHolder)
+        self.canvasView.isHidden = newItem.videoMuted
         
         if newItem.videoMuted {
             self.sendSubviewToBack(self.canvasView)

@@ -98,6 +98,7 @@ public class PixelBufferRenderView: DragFloatView {
     
     func updateVideoState(_ mute: Bool) {
         isVideoMuted = mute
+        videoContainerView.isHidden = mute
         if mute {
             self.displayLayer.flushAndRemoveImage()
             // Hide the layer
@@ -205,6 +206,7 @@ public class PixelBufferRenderView: DragFloatView {
     }
     
     func renderVideoPixelBuffer(pixelBuffer: CVPixelBuffer, width: Int32, height: Int32) {
+        guard !isVideoMuted else { return }
         let updateLayout = {
             self.videoWidth = width
             self.videoHeight = height

@@ -31,6 +31,15 @@ class LiveCommunicationManager: NSObject {
     private var uuid: UUID?
     
     private var handledEndCallId: String?
+
+    private let answerGate = VoIPAnswerGate()
+    private var pendingJoinAction: JoinConversationAction?
+    private var pendingJoinTimeout: DispatchWorkItem?
+    private var pendingJoinStartedAt: TimeInterval?
+    private let joinTimeoutSeconds: TimeInterval = 10
+    private let backgroundRestorationGate = VoIPBackgroundRestorationGate()
+    private var backgroundRestorationTimeout: DispatchWorkItem?
+    private var pendingEndAction: EndConversationAction?
     
     var currentUserMute: Bool = false // 当前用户是否静音
     
@@ -69,7 +78,8 @@ class LiveCommunicationManager: NSObject {
         manager?.delegate = self
     }
          
-    func reportIncomingCall(uuid: UUID, callerName: String, call type: CallType) {
+    func reportIncomingCall(uuid: UUID, callerName: String, call type: CallType,
+                            completion: ((Bool) -> Void)? = nil) {
         let local = Handle(type: .generic, value: callerName, displayName: callerName)
         var capabilities: Conversation.Capabilities? = []
         if type != .singleAudio {
@@ -77,9 +87,21 @@ class LiveCommunicationManager: NSObject {
         }
         let update = Conversation.Update(localMember: local,members: [local],activeRemoteMembers: [local],capabilities: capabilities)
          
+        guard let manager else {
+            consoleLogInfo("[LiveCommunicationManager] cannot report incoming call without ConversationManager", type: .error)
+            completion?(false)
+            return
+        }
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playAndRecord)
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {
+            
+        }
         Task {
             do {
-                try await manager?.reportNewIncomingConversation(uuid: uuid, update: update)
+
+                try await manager.reportNewIncomingConversation(uuid: uuid, update: update)
                 consoleLogInfo("[LiveCommunicationManager] successfully reported new incoming call: \(callerName) uuid: \(uuid.uuidString) type: \(type.rawValue)", type: .debug)
                 CallKitManager.shared.callInfo?.state = .ringing
                 self.uuid = uuid
@@ -88,25 +110,38 @@ class LiveCommunicationManager: NSObject {
                         listener.onReceivedCall?(callType: type, userId: CallKitManager.shared.callInfo?.callerId ?? "", extensionInfo: CallKitManager.shared.callInfo?.extensionInfo)
                     }
                 }
+                completion?(true)
             } catch {
                 consoleLogInfo("[LiveCommunicationManager] failed to report new incoming call: \(error.localizedDescription)", type: .error)
+                completion?(false)
             }
         }
     }
      
     func endCall(){
+        let endingCallID = CallKitManager.shared.callInfo?.callId
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let endingCallID else { return }
+            if self.answerGate.pendingCallID == endingCallID {
+                self.finishPendingJoin(callID: endingCallID, success: false, endCallOnFailure: false)
+            }
+            self.answerGate.end(callID: endingCallID)
+        }
         if let callId = CallKitManager.shared.callInfo?.callId, !callId.isEmpty {
             self.handledEndCallId = callId
         }
         self.manager?.invalidate()
         self.manager = nil
         self.uuid = nil
-        DispatchQueue.main.async {
-            if UIApplication.shared.applicationState == .background {
-                ChatClient.shared().applicationDidEnterBackground(UIApplication.shared)
-            }
-        }
         consoleLogInfo("[LiveCommunicationManager] destroy ConversationManager", type: .debug)
+    }
+
+    func restoreBackgroundAfterNonRejectCallEnd(callID: String) {
+        guard !callID.isEmpty, !backgroundRestorationGate.shouldDefer(callID: callID) else { return }
+        let currentCallID = CallKitManager.shared.callInfo?.callId
+        guard UIApplication.shared.applicationState == .background,
+              currentCallID == nil || currentCallID?.isEmpty == true else { return }
+        ChatClient.shared().applicationDidEnterBackground(UIApplication.shared)
     }
 }
 
@@ -121,10 +156,7 @@ extension LiveCommunicationManager: PKPushRegistryDelegate {
     func pushRegistry(_ registry: PKPushRegistry, didReceiveIncomingPushWith payload: PKPushPayload, for type: PKPushType, completion: @escaping () -> Void) {
         consoleLogInfo("[LiveCommunicationManager] didReceiveIncomingPushWith payload: \(payload.dictionaryPayload)", type: .debug)
         ChatClient.shared().applicationWillEnterForeground(UIApplication.shared)
-        // 处理呼叫到来的逻辑
-        handleIncomingCall(payload: payload)
-        Thread.sleep(forTimeInterval: 0.05)
-        completion()
+        handleIncomingCall(payload: payload, completion: completion)
     }
     
     func pushRegistry(_ registry: PKPushRegistry, didInvalidatePushTokenFor type: PKPushType) {
@@ -132,62 +164,38 @@ extension LiveCommunicationManager: PKPushRegistryDelegate {
     }
     
     // MARK: - 处理呼叫到来
-    private func handleIncomingCall(payload: PKPushPayload) {
-        let custom = payload.dictionaryPayload["e"] as? Dictionary<String, Any>
-        print("payload dictionary: \(String(describing: custom))")
-        var callId = ""
-        if let id = custom?[kCallId] as? String {
-            callId = id
-        }
+    private func handleIncomingCall(payload: PKPushPayload, completion: @escaping () -> Void) {
+        let custom = payload.dictionaryPayload["e"] as? [String: Any]
+        let callExtension: [String: Any]? = {
+            if let json = custom?["ext"] as? String,
+               let data = json.data(using: .utf8),
+               let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                return value
+            }
+            return nil
+        }()
+        let callId = custom?["callId"] as? String ?? ""
         let callerID = payload.dictionaryPayload["f"] as? String ?? ""
-        let callerDeviceId = custom?[kCallerDevId] as? String ?? ""
-        let calleeDeviceId = custom?[kCalleeDevId] as? String ?? ""
         let calleeID = ChatClient.shared().currentUsername ?? ""
-        var callerNickname = ""
-        if let nickname = custom?["callerNickname"] as? String {
-            callerNickname = nickname
-        }
-        var channelName = ""
-        if let channel = custom?[kChannelName] as? String {
-            channelName = channel
-        }
-        var callType = CallType.singleAudio
-        if let type = custom?[kCallType] as? UInt {
-            callType = CallType(rawValue: type) ?? callType
-        }
-        var groupId = ""
-        var groupName = ""
-        var groupAvatar = ""
-        if let group = custom?[kCallKitGroupExt] as? [String:Any] {
-            groupId = group["groupId"] as? String ?? ""
-            groupName = group["groupName"] as? String ?? ""
-            groupAvatar = group["groupAvatar"] as? String ?? ""
-        }
-        if let userJson = custom?[kUserInfo] as? [String: Any] {//解析携带的用户信息
-            let profile = CallUserProfile()
-            profile.setValuesForKeys(userJson)
-            if profile.id.isEmpty {
-                profile.id = callerID
-            }
-            if CallKitManager.shared.usersCache[profile.id] == nil {
-                CallKitManager.shared.usersCache[profile.id] = profile
-            } else {
-                CallKitManager.shared.usersCache[profile.id]?.nickname = profile.nickname
-                CallKitManager.shared.usersCache[profile.id]?.avatarURL = profile.avatarURL
-            }
-        }
-        if let group = payload.dictionaryPayload["g"] as? String {
-            groupId = group
+        let callerNickname = custom?["nickname"] as? String ?? ""
+        let callerAvatar = custom?["avatar"] as? String ?? ""
+        let callType: CallType = (custom?["kind"] as? String)?.uppercased() == "CONFERENCE"
+            ? .groupCall : (custom?["mediaType"] as? String)?.uppercased() == "VIDEO" ? .singleVideo : .singleAudio
+        let groupId = custom?["conversationId"] as? String ?? ""
+        if !callerID.isEmpty, !callerNickname.isEmpty || !callerAvatar.isEmpty {
+            let profile = CallKitManager.shared.usersCache[callerID] ?? CallUserProfile()
+            profile.id = callerID
+            if !callerNickname.isEmpty { profile.nickname = callerNickname }
+            if !callerAvatar.isEmpty { profile.avatarURL = callerAvatar }
+            CallKitManager.shared.usersCache[callerID] = profile
         }
         self.handledEndCallId = nil
-        CallKitManager.shared.callInfo = CallInfo(callId: callId, callerId: callerID, callerDeviceId: callerDeviceId, channelName: channelName, type: callType)
+        CallKitManager.shared.callInfo = CallInfo(callId: callId, callerId: callerID, callerDeviceId: "", channelName: callId, type: callType)
         CallKitManager.shared.callInfo?.calleeDeviceId = ChatClient.shared().getDeviceConfig(nil)?.deviceUUID ?? ""
         CallKitManager.shared.callInfo?.groupId = groupId
-        CallKitManager.shared.callInfo?.groupName = groupName
-        CallKitManager.shared.callInfo?.groupAvatar = groupAvatar
         CallKitManager.shared.callInfo?.calleeId = calleeID
         CallKitManager.shared.callInfo?.state = .ringing
-        CallKitManager.shared.callInfo?.extensionInfo = custom?[kUserInfo] as? [String: Any]
+        CallKitManager.shared.callInfo?.extensionInfo = callExtension
         CallKitManager.shared.hydrateRTCCachesIfNeeded()
         CallKitManager.shared.refreshRTCCredentialIfNeeded(.join)
         if let msgId = payload.dictionaryPayload["m"] as? String {
@@ -203,7 +211,12 @@ extension LiveCommunicationManager: PKPushRegistryDelegate {
         } else {
             consoleLogInfo("[LiveCommunicationManager] reuse UUID: \(uuid!.uuidString)", type: .debug)
         }
-        LiveCommunicationManager.shared.reportIncomingCall(uuid: uuid!, callerName: callerNickname.isEmpty ? callerID:callerNickname,call: callType)
+        LiveCommunicationManager.shared.reportIncomingCall(uuid: uuid!, callerName: callerNickname.isEmpty ? callerID:callerNickname,
+                                                            call: callType) { reported in
+            consoleLogInfo("[LiveCommunicationManager] complete VoIP push after incoming call report: \(reported) callId: \(callId)",
+                           type: reported ? .debug : .error)
+            completion()
+        }
     }
     
     func performAction(type: LiveCommunicationKitActionType) {
@@ -252,6 +265,7 @@ extension LiveCommunicationManager: ConversationManagerDelegate
         consoleLogInfo("[LiveCommunicationManager] perform action:\(action)",type: .debug)
         switch action.self {
         case let action as LiveCommunicationKit.JoinConversationAction:
+            consoleLogInfo("[LiveCommunicationManager] voip.join stage=received uuid=\(action.conversationUUID) mainThread=\(Thread.isMainThread)", type: .debug)
             self.joinAction(action: action)
             break
         case let action as LiveCommunicationKit.EndConversationAction:
@@ -266,28 +280,123 @@ extension LiveCommunicationManager: ConversationManagerDelegate
     }
     
     private func joinAction(action: JoinConversationAction) {
-        if let call = CallKitManager.shared.callInfo,!call.callId.isEmpty,call.state == .ringing {
-            DispatchQueue.main.async {
-                if let currentVC = UIViewController.currentController {
-                    if !(currentVC is Call1v1AudioViewController || currentVC is Call1v1VideoViewController || currentVC is CallMultiViewController) {
-                        UIViewController.currentController?.showCallToast(toast: "Connecting".call.localize)
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.joinAction(action: action) }
+            return
+        }
+        guard let call = CallKitManager.shared.callInfo, !call.callId.isEmpty,
+              action.conversationUUID == uuid else {
+            consoleLogInfo("[LiveCommunicationManager] voip.join stage=fail reason=call_mismatch uuid=\(action.conversationUUID) currentCallId=\(CallKitManager.shared.callInfo?.callId ?? "")", type: .error)
+            action.fail()
+            return
+        }
+        consoleLogInfo("[LiveCommunicationManager] voip.join stage=main callId=\(call.callId) state=\(call.state) remainingMs=\(Int(action.timeoutDate.timeIntervalSinceNow * 1000))", type: .debug)
+        if answerGate.isFulfilled(callID: call.callId), call.state != .idle {
+            consoleLogInfo("[LiveCommunicationManager] voip.join stage=fulfill_before reason=already_fulfilled callId=\(call.callId)", type: .debug)
+            action.fulfill()
+            consoleLogInfo("[LiveCommunicationManager] voip.join stage=fulfill_after reason=already_fulfilled callId=\(call.callId)", type: .debug)
+            return
+        }
+        guard call.state == .ringing, pendingJoinAction == nil else {
+            consoleLogInfo("[LiveCommunicationManager] voip.join stage=fail reason=call_unavailable callId=\(call.callId) pending=\(pendingJoinAction != nil)", type: .error)
+            action.fail()
+            return
+        }
+        if let currentVC = UIViewController.currentController,
+           !(currentVC is Call1v1AudioViewController || currentVC is Call1v1VideoViewController || currentVC is CallMultiViewController) {
+            currentVC.showCallToast(toast: "Connecting".call.localize)
+        }
+        answerGate.begin(callID: call.callId)
+        pendingJoinAction = action
+        pendingJoinStartedAt = ProcessInfo.processInfo.systemUptime
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, self.answerGate.pendingCallID == call.callId else { return }
+            consoleLogInfo("[LiveCommunicationManager] joining call timed out: \(call.callId)", type: .error)
+            self.finishPendingJoin(callID: call.callId, success: false)
+        }
+        pendingJoinTimeout = timeout
+        let remainingActionTime = max(0, action.timeoutDate.timeIntervalSinceNow - 1)
+        DispatchQueue.main.asyncAfter(deadline: .now() + min(joinTimeoutSeconds, remainingActionTime), execute: timeout)
+        if !ChatClient.shared().isConnected {
+            consoleLogInfo("[LiveCommunicationManager] reconnect IM for join action, callId: \(call.callId)", type: .debug)
+            ChatClient.shared().applicationWillEnterForeground(UIApplication.shared)
+        }
+        resumePendingJoinIfReady()
+    }
+
+    func signalingInvitationReceived(callID: String) {
+        DispatchQueue.main.async { [weak self] in
+            self?.answerGate.invitationReceived(callID: callID)
+            self?.resumePendingJoinIfReady()
+        }
+    }
+
+    func imDidConnect() {
+        DispatchQueue.main.async { [weak self] in self?.resumePendingJoinIfReady() }
+    }
+
+    private func resumePendingJoinIfReady() {
+        guard let callID = answerGate.pendingCallID else { return }
+        let call = CallKitManager.shared.callInfo
+        let isConnected = ChatClient.shared().isConnected
+        let hasEngine = CallKitManager.shared.engine != nil
+        let isRinging = call?.callId == callID && call?.state == .ringing
+        guard hasEngine, answerGate.beginAcceptIfReady(callID: callID,
+                                                       isConnected: isConnected,
+                                                       isRinging: isRinging) else {
+            consoleLogInfo("[LiveCommunicationManager] join waiting callId: \(callID) connected: \(isConnected) engine: \(hasEngine) ringing: \(isRinging)", type: .debug)
+            return
+        }
+        Task { [weak self] in
+            do {
+                _ = try await CallKitManager.shared.credentialForUse(reason: .join)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.answerGate.pendingCallID == callID else { return }
+                    guard ChatClient.shared().isConnected,
+                          CallKitManager.shared.callInfo?.callId == callID,
+                          CallKitManager.shared.callInfo?.state == .ringing else {
+                        self.finishPendingJoin(callID: callID, success: false)
+                        return
+                    }
+                    CallKitManager.shared.acceptForVoIP { [weak self] success in
+                        consoleLogInfo("[LiveCommunicationManager] voip.join stage=accept_callback callId=\(callID) success=\(success) mainThread=\(Thread.isMainThread)", type: .debug)
+                        DispatchQueue.main.async { [weak self] in
+                            self?.finishPendingJoin(callID: callID, success: success)
+                        }
                     }
                 }
-            }
-            
-            Task {
-                do {
-                    _ = try await CallKitManager.shared.credentialForUse(reason: .join)
-                    CallKitManager.shared.accept()
-                    action.fulfill()
-                } catch {
-                    consoleLogInfo("[LiveCommunicationManager] RTC credential unavailable: \(error.localizedDescription)", type: .error)
-                    action.fail()
+            } catch {
+                consoleLogInfo("[LiveCommunicationManager] RTC credential unavailable: \(error.localizedDescription)", type: .error)
+                DispatchQueue.main.async { [weak self] in
+                    self?.finishPendingJoin(callID: callID, success: false)
                 }
             }
+        }
+    }
+
+    private func finishPendingJoin(callID: String, success: Bool, endCallOnFailure: Bool = true) {
+        guard answerGate.pendingCallID == callID, let action = pendingJoinAction else { return }
+        let callIsCurrent = CallKitManager.shared.callInfo?.callId == callID
+            && CallKitManager.shared.callInfo?.state != .idle
+        let didAccept = success && callIsCurrent
+        let elapsedMs = pendingJoinStartedAt.map { Int((ProcessInfo.processInfo.systemUptime - $0) * 1000) } ?? -1
+        pendingJoinAction = nil
+        pendingJoinStartedAt = nil
+        pendingJoinTimeout?.cancel()
+        pendingJoinTimeout = nil
+        answerGate.end(callID: callID)
+        if didAccept {
+            answerGate.markFulfilled(callID: callID)
+            consoleLogInfo("[LiveCommunicationManager] voip.join stage=fulfill_before callId=\(callID) elapsedMs=\(elapsedMs)", type: .debug)
+            action.fulfill()
+            consoleLogInfo("[LiveCommunicationManager] voip.join stage=fulfill_after callId=\(callID) elapsedMs=\(elapsedMs)", type: .debug)
         } else {
-            consoleLogInfo("[LiveCommunicationManager] do not have call info", type: .error)
+            consoleLogInfo("[LiveCommunicationManager] voip.join stage=fail_before callId=\(callID) elapsedMs=\(elapsedMs) success=\(success) callIsCurrent=\(callIsCurrent)", type: .error)
             action.fail()
+            consoleLogInfo("[LiveCommunicationManager] voip.join stage=fail_after callId=\(callID)", type: .debug)
+            if endCallOnFailure, callIsCurrent {
+                CallKitManager.shared.updateCallEndReason(.abnormalEnd)
+            }
         }
     }
     
@@ -309,7 +418,7 @@ extension LiveCommunicationManager: ConversationManagerDelegate
         }
     }
     
-    private func hangupCurrentCallIfNeeded(source: String) -> Bool {
+    private func hangupCurrentCallIfNeeded(source: String, rejectionCompletion: ((Bool) -> Void)? = nil) -> Bool {
         guard let call = CallKitManager.shared.callInfo, !call.callId.isEmpty else {
             consoleLogInfo("[LiveCommunicationManager] skip \(source) because call info is empty", type: .debug)
             return false
@@ -319,34 +428,97 @@ extension LiveCommunicationManager: ConversationManagerDelegate
             return false
         }
         handledEndCallId = call.callId
-        CallKitManager.shared.hangup()
+        if let rejectionCompletion, call.state == .ringing {
+            CallKitManager.shared.hangupForVoIPRejection(completion: rejectionCompletion)
+        } else {
+            CallKitManager.shared.hangup()
+        }
         return true
+    }
+
+    private func finishBackgroundRestoration(callID: String, source: String) {
+        guard backgroundRestorationGate.shouldDefer(callID: callID) else { return }
+        backgroundRestorationTimeout?.cancel()
+        backgroundRestorationTimeout = nil
+        let action = pendingEndAction
+        pendingEndAction = nil
+        CallKitManager.shared.finishVoIPRejectionIfNeeded(callID: callID)
+        let currentCallID = CallKitManager.shared.callInfo?.callId
+        let shouldRestore = backgroundRestorationGate.finish(callID: callID,
+            currentCallID: currentCallID, isBackground: UIApplication.shared.applicationState == .background)
+        if shouldRestore {
+            consoleLogInfo("[LiveCommunicationManager] restore background after reject \(source), callId: \(callID)", type: .debug)
+            ChatClient.shared().applicationDidEnterBackground(UIApplication.shared)
+        }
+        action?.fulfill()
     }
     
     private func endAction(action: EndConversationAction) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.endAction(action: action) }
+            return
+        }
         consoleLogInfo("[LiveCommunicationManager] perform endAction:",type: .debug)
-        _ = hangupCurrentCallIfNeeded(source: "endAction")
-        action.fulfill()
-        DispatchQueue.main.asyncAfter(wallDeadline: .now()+1.5) {
-            consoleLogInfo("[LiveCommunicationManager] endAction delay execute applicationDidEnterBackground",type: .debug)
-            ChatClient.shared().applicationDidEnterBackground(UIApplication.shared)
+        if let callID = answerGate.pendingCallID {
+            finishPendingJoin(callID: callID, success: false, endCallOnFailure: false)
+        }
+        let rejectingCallID: String? = {
+            guard let call = CallKitManager.shared.callInfo, !call.callId.isEmpty,
+                  call.state == .ringing, handledEndCallId != call.callId else { return nil }
+            return call.callId
+        }()
+        if let rejectingCallID {
+            backgroundRestorationGate.begin(callID: rejectingCallID)
+            pendingEndAction = action
+        }
+        let didHangup = hangupCurrentCallIfNeeded(source: "endAction", rejectionCompletion: rejectingCallID.map { callID in
+            { [weak self] success in
+                consoleLogInfo("[LiveCommunicationManager] reject completion: \(success), callId: \(callID)", type: .debug)
+                self?.finishBackgroundRestoration(callID: callID, source: success ? "ack" : "failure")
+            }
+        })
+        if let rejectingCallID {
+            guard didHangup else {
+                finishBackgroundRestoration(callID: rejectingCallID, source: "skipped")
+                return
+            }
+            let timeout = DispatchWorkItem { [weak self] in
+                self?.finishBackgroundRestoration(callID: rejectingCallID, source: "timeout")
+            }
+            backgroundRestorationTimeout = timeout
+            let remainingActionTime = max(0, action.timeoutDate.timeIntervalSinceNow - 1)
+            DispatchQueue.main.asyncAfter(deadline: .now() + min(5, remainingActionTime), execute: timeout)
+        } else {
+            action.fulfill()
         }
     }
     
     func conversationManager(_ manager: ConversationManager, timedOutPerforming action: ConversationAction) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.conversationManager(manager, timedOutPerforming: action) }
+            return
+        }
         // 会话超时
         consoleLogInfo("[LiveCommunicationManager] perform timedOutPerforming:\(action)",type: .debug)
+        if let callID = answerGate.pendingCallID {
+            finishPendingJoin(callID: callID, success: false, endCallOnFailure: false)
+        }
         _ = hangupCurrentCallIfNeeded(source: "timedOutPerforming")
     }
     
     func conversationManager(_ manager: ConversationManager, didActivate audioSession: AVAudioSession) {
-        // 会话激活了
-        consoleLogInfo("[LiveCommunicationManager] perform didActivate:",type: .debug)
+        consoleLogInfo("[LiveCommunicationManager] voip.audioSession stage=didActivate callId=\(CallKitManager.shared.callInfo?.callId ?? "") pendingCallId=\(answerGate.pendingCallID ?? "") category=\(audioSession.category.rawValue) mode=\(audioSession.mode.rawValue) inputs=\(audioSession.currentRoute.inputs.map { $0.portType.rawValue }) mainThread=\(Thread.isMainThread)", type: .debug)
     }
     
     func conversationManager(_ manager: ConversationManager, didDeactivate audioSession: AVAudioSession) {
-        //会话失效了
-        consoleLogInfo("[LiveCommunicationManager] perform didDeactivate:",type: .debug)
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in self?.conversationManager(manager, didDeactivate: audioSession) }
+            return
+        }
+        consoleLogInfo("[LiveCommunicationManager] voip.audioSession stage=didDeactivate callId=\(CallKitManager.shared.callInfo?.callId ?? "") pendingCallId=\(answerGate.pendingCallID ?? "") mainThread=\(Thread.isMainThread)", type: .debug)
+        if let callID = answerGate.pendingCallID {
+            finishPendingJoin(callID: callID, success: false, endCallOnFailure: false)
+        }
         _ = hangupCurrentCallIfNeeded(source: "didDeactivate")
     }
 }

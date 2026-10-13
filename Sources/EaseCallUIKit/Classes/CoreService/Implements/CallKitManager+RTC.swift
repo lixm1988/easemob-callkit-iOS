@@ -528,10 +528,12 @@ extension CallKitManager: AgoraRtcEngineDelegate {
             }
             if call.type == .singleVideo {
                 self.performRTCUIUpdate {
+                    guard self.callInfo === call else { return }
                     switch state {
                     case .starting,.decoding:
                         if reason == .remoteUnmuted {//Remote video unmuted
                             if let controller = UIViewController.currentController as? Call1v1VideoViewController {
+                                controller.remoteCameraMuted = false
                                 if !controller.firstRemoteVideoAppeared {
                                     controller.floatViewClicked(dragView: controller.floatView)
                                     controller.firstRemoteVideoAppeared = true
@@ -539,6 +541,7 @@ extension CallKitManager: AgoraRtcEngineDelegate {
                                 controller.floatView.updateVideoState(false)
                             } else {
                                 if let controller = self.callVC as? Call1v1VideoViewController {
+                                    controller.remoteCameraMuted = false
                                     controller.floatView.updateVideoState(false)
                                 }
                             }
@@ -547,8 +550,10 @@ extension CallKitManager: AgoraRtcEngineDelegate {
                     case .stopped:
                         if reason == .remoteMuted {// Remote video muted
                             if let controller = UIViewController.currentController as? Call1v1VideoViewController {
+                                controller.remoteCameraMuted = true
                                 controller.floatView.updateVideoState(true)
                             } else if let controller = self.callVC as? Call1v1VideoViewController {
+                                controller.remoteCameraMuted = true
                                 controller.floatView.updateVideoState(true)
                             }
                         }
@@ -666,14 +671,11 @@ extension CallKitManager: AgoraRtcEngineDelegate {
 
         var unknownInfoIds = [String]()
         for userId in userIds {
-            if let profile = CallKitManager.shared.usersCache[userId] {
-                if profile.nickname.isEmpty {
-                    unknownInfoIds.append(userId)
-                }
-            } else {
+            if shouldFetchUserProfile(userId) {
                 unknownInfoIds.append(userId)
             }
         }
+        guard !unknownInfoIds.isEmpty else { return }
         
         if CallKitManager.shared.profileProvider != nil,CallKitManager.shared.profileProviderOC == nil {
             Task {
@@ -694,6 +696,7 @@ extension CallKitManager: AgoraRtcEngineDelegate {
                             user.selected = profile.selected
                             CallKitManager.shared.usersCache[profile.id] = user
                         }
+                        self.markUserProfileFetched(profile.id)
                     }
                 }
                 let ids = unknownInfoIds
@@ -727,6 +730,7 @@ extension CallKitManager: AgoraRtcEngineDelegate {
                             user.selected = profile.selected
                             CallKitManager.shared.usersCache[profile.id] = user
                         }
+                        self.markUserProfileFetched(profile.id)
                     }
                     DispatchQueue.main.async {
                         if let controller = UIViewController.currentController as? CallMultiViewController {
@@ -781,7 +785,8 @@ extension CallKitManager: AgoraVideoFrameDelegate {
             if let call = self.callInfo, call.type == .singleVideo {
                 let controller = (UIViewController.currentController as? Call1v1VideoViewController)
                     ?? (self.callVC as? Call1v1VideoViewController)
-                if let floatView = controller?.floatView {
+                if let controller, !controller.remoteCameraMuted {
+                    let floatView = controller.floatView
                     if floatView.isVideoMuted {
                         floatView.updateVideoState(false)
                     }

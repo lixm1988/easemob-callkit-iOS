@@ -16,6 +16,16 @@ public let CallKitVersion = "5.0.0"
 @objcMembers public class CallKitManager: NSObject {
     /// Cache for user profiles
     @CallAtomicUnfairLock public var usersCache: [String: CallProfileProtocol] = [:]
+    @nonobjc @CallAtomicUnfairLock var fetchedUserProfileIDs: Set<String> = []
+
+    @nonobjc func shouldFetchUserProfile(_ userId: String) -> Bool {
+        guard let profile = usersCache[userId] else { return true }
+        return profile.nickname.isEmpty && !fetchedUserProfileIDs.contains(userId)
+    }
+
+    @nonobjc func markUserProfileFetched(_ userId: String) {
+        _ = $fetchedUserProfileIDs.modify { $0.insert(userId) }
+    }
 
     /// CallKitManager shared instance
     public static let shared = CallKitManager()
@@ -31,6 +41,7 @@ public let CallKitVersion = "5.0.0"
     
     /// Current call information
     public internal(set) var callInfo : CallInfo? = nil
+    var pendingVoIPRejectionCallID: String?
     
     public internal(set) var receivedCalls = [String:CallInfo]()
         
@@ -143,15 +154,14 @@ public let CallKitVersion = "5.0.0"
         let foregroundObserver = NotificationCenter.default.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
             self?.hydrateRTCCachesIfNeeded()
             self?.refreshRTCCredentialIfNeeded(.foreground)
-            if let info = self?.callInfo, info.state == .ringing {
-                if let controller = UIViewController.currentController {
-                    if self?.callInfo?.calleeId == ChatClient.shared().currentUsername {
-                        if !(controller is CallMultiViewController || controller is Call1v1AudioViewController || controller is Call1v1VideoViewController) {
-                            self?.presentCalleeController(call: info)
-                        }
-                    }
-                }
-            }
+        }
+        let activeObserver = NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self, let info = self.callInfo, info.state == .ringing,
+                  info.calleeId == ChatClient.shared().currentUsername,
+                  self.popup?.superview == nil,
+                  let controller = UIViewController.currentController,
+                  !(controller is CallMultiViewController || controller is Call1v1AudioViewController || controller is Call1v1VideoViewController) else { return }
+            self.presentCalleeController(call: info)
         }
         let backgroundObserver = NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self = self, self.tokenProvider != nil else { return }
@@ -167,7 +177,7 @@ public let CallKitVersion = "5.0.0"
         let terminateObserver = NotificationCenter.default.addObserver(forName: UIApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             self?.applicationWillTerminate()
         }
-        notificationObservers = [foregroundObserver, backgroundObserver, terminateObserver]
+        notificationObservers = [foregroundObserver, activeObserver, backgroundObserver, terminateObserver]
 //        return nil
     }
 
@@ -355,6 +365,7 @@ public let CallKitVersion = "5.0.0"
         self.itemsCache.removeAll()
         self.canvasCache.removeAll()
         self.usersCache.removeAll()
+        $fetchedUserProfileIDs.modify { $0.removeAll() }
         self.listeners.removeAllObjects()
         AgoraRtcEngineKit.destroy()
         self.engine = nil
@@ -465,6 +476,11 @@ public let CallKitVersion = "5.0.0"
 extension CallKitManager: ChatClientListener {
     public func connectionStateDidChange(_ aConnectionState: ConnectionState) {
         if aConnectionState == .connected {//IM SDK connected successfully
+            defer {
+                if #available(iOS 17.4, *), self.config.enableVOIP {
+                    LiveCommunicationManager.shared.imDidConnect()
+                }
+            }
             if self.tokenProvider == nil {
                 self.initializeRTCFromIMSDKAfterConnection()
                 return
